@@ -1,0 +1,18 @@
+{
+  "name": "lcb75_prior_reproduction",
+  "release": "release_v6",
+  "tiers": {
+    "easy": 25,
+    "medium": 25,
+    "hard": 25
+  },
+  "request_seed": 42,
+  "ordered_question_ids": [
+    "2730", "2819", "2824", "2831", "2844", "2855", "2953", "3033", "3080", "3104", "3193", "3195", "3203", "3206", "3227", "3245", "3252", "3262", "3344", "3371", "3376", "3394", "3466", "3494", "3517", "3567", "3625", "3626", "3636", "3653", "3655", "3659", "3684", "3687", "3709", "3715", "3754", "3759", "3770", "abc301_b", "abc302_e", "abc304_c", "abc308_f", "abc310_f", "abc314_c", "abc324_f", "abc327_e", "abc331_d", "abc332_d", "abc338_c", "abc342_d", "abc343_b", "abc344_b", "abc351_b", "abc355_e", "abc359_d", "abc359_e", "abc361_b", "abc361_e", "abc363_f", "abc366_b", "abc377_e", "abc378_a", "abc382_a", "abc389_b", "abc389_d", "abc390_a", "abc393_a", "abc399_d", "abc400_e", "arc186_c", "arc188_b", "arc189_c", "arc194_b", "arc195_c"
+  ],
+  "qid_source": "lcb_clean75_coe/results.jsonl",
+  "baseline_set_source": "lcb_clean_75_v12/results.jsonl",
+  "problem_cache": "_lcb_v6_slim.json",
+  "problem_cache_sha256": "68a454088074f666e078e87414d9074630e141b6c31325b4dbf68b5258da7e50",
+  "problem_cache_content_sha256": "4c523bcfb9b608de469e9a84cf5f3a1fc51e914ccb717b662de6578e30a05672"
+}

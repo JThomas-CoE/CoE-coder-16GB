@@ -1,0 +1,16 @@
+# Pinned to the versions used for the release benchmarks (Python 3.12).
+fastapi==0.135.1
+httpx==0.28.1
+pydantic==2.12.5
+PyYAML==6.0.3
+requests==2.32.5
+uvicorn[standard]==0.41.0
+jinja2==3.1.6
+tree-sitter==0.26.0
+tree-sitter-language-pack==1.13.3
+tree-sitter-json==0.24.8
+
+# LiveCodeBench runner dependencies (benchmarks/run_lcb_canonical.py). Versions match the verified install.
+datasets==3.6.0
+pebble==5.2.3
+tqdm==4.70.1

@@ -1,0 +1,1933 @@
+# Clean-slice configuration. This file intentionally contains no legacy router,
+# agent, ladder, registry, session, KB, or launcher configuration.
+#
+# 2026-09-14: origin-gated modify pipeline (see
+# CoE_coder_spec_modify_pipeline_DRAFT.md).  `modify_combo_mode` selects how
+# the local-regeneration prompt is assembled when an artifact carries its
+# originating prompt:
+#   concat     -- mechanical, reproducible concatenation (DEFAULT).
+#   synthesize -- reserved; would let a model rewrite the combined prompt.
+# `concat` is the default because it is the shape that was MEASURED at 75%
+# reliability, it is reproducible byte-for-byte, it costs no extra call, and a
+# synthesizer would reintroduce the exact reconstruction loss the capability
+# study documented (a model summarising an origin and generalising its
+# constants away).  This is a global policy, not a per-domain knob.
+modify_combo_mode: concat
+
+# 2026-09-19: turn progress cadence (see PLAN_progress_mechanism.md).
+#
+# This ONE key governs the single progress mechanism.  It drives two things that
+# share the value deliberately, because they answer the same user question
+# ("is this turn alive?") at the same granularity:
+#
+#   visibility   -- how often a client polls GET /v1/turn/{id}/progress
+#   cancellation -- how often the runtime emits a `checkpoint`, which is the
+#                   ONLY event that can carry a cooperative stop back to the
+#                   runtime (the token emit sites DISCARD the callback's return
+#                   value, so a token can never be a stop channel).
+#
+# CONSEQUENCE TO KNOW: cooperative cancellation of a NON-STREAMING turn takes
+# effect at the next checkpoint, so its worst-case latency is this value.  A
+# streaming turn cancels immediately (its asyncio task is cancelled outright).
+#
+# The value does NOT affect how quickly a STALLED turn becomes visible: the
+# progress endpoint computes `since_last_event_s` from the turn record at
+# request time, so silence is visible the moment it is polled.
+#
+# 30 is the default and matches the local SSE heartbeat interval.  Precedence:
+#   metadata.checkpoint_interval_s  >  this key  >  code default (30.0)
+# An absent/null key falls back to the code default, so deleting this line is
+# always safe.
+progress_interval_s: 30
+
+# Number of finished/in-flight turn records retained for the progress endpoint
+# and /v1/cancel.  Bounded by INSERTION order, not completion, so a long turn is
+# never evicted merely because many short turns finished after it started.
+# A client polling an evicted id gets a 404, which is the intended contract.
+turn_record_keep: 64
+
+backends:
+  ollama:
+    url: "http://127.0.0.1:11434/v1"
+    api_key: "ollama"
+    timeout: 900
+    # ================================================================
+    # AUTO-START LIFECYCLE (2026-09-21) -- generic, not Ollama-specific.
+    # ================================================================
+    # CoE-coder talks to its local inference backend over an
+    # OpenAI-compatible HTTP surface, so the keys below describe ANY
+    # backend (Ollama, llama.cpp's `llama-server`, LM Studio, ...):
+    #
+    #   auto_start          spawn it at boot when the URL is not answering.
+    #   binary_name          PATH name to resolve when binary_path is null.
+    #   serve_args           args after the binary (`ollama serve`).
+    #   startup_timeout_s    readiness deadline after spawn.
+    #   stop_on_exit         ACCEPTED AND IGNORED -- see below.
+    #
+    # TO SWITCH BACKENDS: point `url` at the other server and set
+    # `binary_name`/`serve_args` to its launcher.  Nothing in the code
+    # names Ollama; backend_lifecycle.py is provider-agnostic.
+    #
+    # THE INFERENCE BACKEND HAS NO FALLBACK, so an unreachable backend is
+    # FATAL, not warn-and-continue: `server.py` prints a loud remedy
+    # message and aborts boot rather than serving an instance whose every
+    # request would fail.  (FLM, by contrast, is a *router* accelerator
+    # with an Ollama fallback, so IT warns and continues.  The asymmetry
+    # is deliberate -- see backend_lifecycle.py's module docstring.)
+    #
+    # `stop_on_exit` IS DELIBERATELY IGNORED by backend_lifecycle.py:
+    # CoE-coder owns the START decision (a missing backend is a broken
+    # install) but never the STOP decision.  On this reference
+    # configuration `backends.cloud.url` is the SAME endpoint as this
+    # one -- the local daemon proxies the cloud provider -- so the
+    # daemon serves local inference AND the cloud tier.  Stopping it
+    # would silently take out cloud escalation.  The key is accepted so
+    # the intent is explicit rather than implicit, and set false to
+    # match.  Reversal: nothing to reverse; there is no stop path.
+    auto_start: true
+    binary_path: null
+    binary_name: "ollama"
+    serve_args: ["serve"]
+    startup_timeout_s: 60
+    stop_on_exit: false
+  flm:
+    url: "http://127.0.0.1:52625/v1"
+    api_key: "flm"
+    timeout: 120
+    # Auto-start lifecycle.  When ``auto_start`` is true the
+    # runner will attempt to spawn ``flm serve
+    # <router_model>`` if the configured URL is not
+    # responding at boot.  The helper resolves the binary
+    # from ``binary_path`` (or, if unset, from PATH via
+    # ``shutil.which('flm')``), launches the child detached
+    # with stdout/stderr captured to a log file under
+    # ``log_dir``, and polls the URL until the server
+    # answers ``/v1/models`` or ``startup_timeout_s``
+    # elapses.  On any failure the runner warns and
+    # continues with the Ollama router fallback.  By
+    # default ``stop_on_exit`` is false — FLM has a small
+    # footprint and keeping it alive avoids model-load
+    # latency on the next runner invocation.
+    auto_start: true
+    binary_path: null
+    router_model_id: "qwen3.5:4b"
+    img_pre_resize: 1
+    startup_timeout_s: 60
+    log_dir: "clean_slice_runs"
+    stop_on_exit: false
+  # Optional cloud backend for the T3 zero-shot escalation of last resort.
+  # When ``enabled`` is true AND ``url``/``model_id`` are set, the T3
+  # fallback (after the local specialist ladder exhausts) calls this
+  # OpenAI-compatible endpoint (e.g. Ollama cloud) instead of the local
+  # generalist.  The local generalist (``models.general_fallback``) is
+  # UNCHANGED and still serves domains with no wired specialist.  If
+  # ``enabled`` is false or the endpoint is unreachable, T5 falls back
+  # to the local generalist.  ``api_key`` is optional (some endpoints
+  # are keyless); set it to your Ollama cloud / provider key.
+  cloud:
+    # Option A (zero-secret): the LOCAL daemon proxies ollama.com using
+    # the ollama login stored on this machine (established via an
+    # interactive `ollama run <model>:cloud`).  The CoE repo/config
+    # never holds the API key -- it lives in ollama's credential store.
+    # Requires ollama >= 0.32 (cloud model proxying).
+    enabled: true
+    url: "http://127.0.0.1:11434/v1"
+    api_key: ""
+    timeout: 180
+    model_id: "deepseek-v4.1-flash:cloud"
+    # Text-only default. Image-bearing T3 requests use vision_model_id.
+    vision: false
+    vision_model_id: "deepseek-v4.1-flash:cloud"
+
+# Every named model instance declares the bounded context the clean slice
+# enforces.  Without an explicit num_ctx, the VRAM manager would otherwise
+# rely on Ollama's 262,144 default and overflow the compact tier budget.
+models:
+  router:
+    provider: flm
+    model_id: "qwen3.5:4b"
+    vision: true
+  router_fallback:
+    provider: ollama
+    model_id: "qwen3.5:4b"
+    vision: true
+    num_ctx: 16384
+    keep_alive: 300
+  general_fallback:
+    provider: ollama
+    # Default generalist (domain_other catch-all): gemma4:12b (Q4_K_M, 11.9B).
+    # Vision verified: /api/show lists `vision`, and an image request at
+    # num_ctx 32768 succeeded. No extra projector download is needed.
+    model_id: "gemma4:12b"
+    num_ctx: 32768
+    num_predict: 24576
+    keep_alive: 300
+    vision: true
+
+# Compact tier targets a dedicated 16 GB card used solely for inference.
+# 0.2 GB is left for the OS / driver overhead; 15.8 GB is the
+# admission-controlled budget.  The estimates below are conservative
+# admission controls, not a replacement for the live /api/ps
+# verification.
+vram_tiers:
+  active: compact
+  # ================================================================
+  # BOOT EVICTION (2026-09-21).
+  # ================================================================
+  # true  (default, and the behaviour before this key existed): unload EVERY
+  #       resident model at startup, whoever spawned it.  Correct for a
+  #       dedicated 16 GB appliance -- it guarantees the admission budget is
+  #       measured on a clean card rather than on a stranger's leftover load.
+  # false (opt-out, for a card with EXCESS VRAM): unload only models CoE knows
+  #       about (the cfg.models + clean_resolution.model_refs roster, see
+  #       vram.py `_build_model_defaults`).  A model loaded by another tool
+  #       (llama.cpp, LM Studio, an unrelated Ollama pull) is LEFT ALONE.
+  #
+  # WARNING for anyone setting `false`: the admission control still measures
+  # against `defined.<active>.total_vram_gb`, so a foreign resident model eats
+  # the budget CoE needs.  Leave at least 16 GB of VRAM free for CoE-coder, or
+  # the first request will fail loudly rather than silently degrade.
+  #
+  # [FLAGGED FALSE as of 2026-09-21] The following sentence was written here
+  # and is superseded.  Quoted VERBATIM so the correction is auditable:
+  #
+  #     # (vram.py
+  #     # raises when a resident model exceeds `usable_gb`, and `_footprint()` raises
+  #     # rather than guessing an undeclared model's size).
+  #
+  # The FIRST clause is accurate and is retained above.  The SECOND clause was
+  # false: `_footprint()` does NOT raise on an undeclared model -- it GUESSES
+  # via `_extract_param_billions(id) * 0.8` whenever the id contains an "<n>b"
+  # pattern, and only raises when it cannot parse one at all.  Before the
+  # 2026-09-21 footprint-table correction, all 13 live local models fell
+  # through to that guess, so the intended loud safety net effectively never
+  # fired.  CORRECTED STATEMENT (2026-09-21): the admission control's loud
+  # failure is `vram.py` raising when a RESIDENT model's measured
+  # `size_vram_gb` exceeds `usable_gb`; `_footprint()`'s raise is the narrow
+  # backstop for an id with no `<n>b` substring, not the general case.  The
+  # footprint table has since been re-baselined so every live model is
+  # declared and the guess is not reached in normal operation.
+  evict_on_boot: true
+  defined:
+    compact:
+      total_vram_gb: 16
+      os_reserved_gb: 0.2
+      max_resident_local_models: 1
+      default_num_ctx: 32768
+      max_num_ctx: 32768
+      default_keep_alive: 300
+      # Black-box deadline for one prepare() cycle (evict + load +
+      # re-probe, up to 3 attempts).  Exceeding it raises
+      # PrepareTimeout, classified as a pathology (reroll with fresh
+      # seed, escalate after budget exhaustion) instead of parking
+      # the request until the server's 210s client-facing SSE idle
+      # watchdog fires (cloud tiers exempt).  Healthy loads are
+      # <=25s on this card; 120s covers the worst legitimate cycle
+      # (evict + cold load + shrink-reload, ~55s) with ~2x margin.
+      # Set very high (999999) to effectively disable the deadline.
+      prepare_deadline_s: 120
+  # --- Declared model WEIGHT footprints (GB, bytes/1e9 of the model blob) ---
+  # DATE-STAMPED 2026-09-21 (step 4 of the config/VRAM-hygiene plan).
+  #
+  # This table is the SUBTRAHEND in the KV estimate:
+  #     estimated_kv_gb = size_vram_gb - declared_weight_gb
+  # so it holds the WEIGHTS ONLY.  It is NOT a weights+KV budget; KV is
+  # accounted separately and bounded live via `max_num_ctx` and the
+  # post-load `size_vram_gb > usable_gb` check.  See vram.py module
+  # docstring ("size_vram which includes the model weight and the KV
+  # cache") and prepare()'s log line "(kv=..GB total=..GB budget=..GB)".
+  #
+  # Values are MEASURED from each model's blob (the layer whose mediaType
+  # is `application/vnd.ollama.image.model`, which IS the GGUF):
+  #     19B-A3B q4_K_M : 13190417664 B = 13.190 GB -> 13.19
+  #     14B-A4B q4_K_M : 10400852256 B = 10.401 GB -> 10.40
+  #     gemma4:12b     :  7381382048 B =  7.381 GB ->  7.38  (model layer
+  #                      only; the separate 0.175 GB `projector` blob -- its
+  #                      vision tower -- is deliberately NOT counted here,
+  #                      because this table models the WEIGHT term and the
+  #                      projector is not loaded for text requests)
+  #     qwen3.5:4b     :  3389971840 B =  3.390 GB ->  3.39
+  #
+  # KEYS ARE WRITTEN BARE.  The runtime resolves the bare id (from
+  # `model_refs`), and vram.py's `_footprint_lookup` now also tolerates a
+  # trailing ":latest" on EITHER side, so a registry/tag mismatch cannot
+  # miss.  Writing bare makes the table and the runtime agree in spelling.
+  #
+  # LOCAL ONLY.  There is deliberately NO cloud entry: cloud models never
+  # reach prepare() and are configured separately (user ruling 2026-09-21,
+  # "no cloud in local matters").  A cloud id reaching the local admission
+  # path should RAISE rather than be silently admitted.
+  #
+  # A model NOT listed here falls back to `_extract_param_billions(id)*0.8`
+  # (a regex guess), which is why every live model must be declared.
+  model_footprints_gb:
+    # --- router + generalist (general-purpose, not specialist models) ---
+    "qwen3.5:4b": 3.39
+    # generalist (models.general_fallback): model layer 7.381 GB (see table note above)
+    "gemma4:12b": 7.38
+    # --- python domain (python-a primary, python-b think-on / tiel, python-c bug_fix) ---
+    "JThomas-CoE/coe-qwen3.6-hc-coding_python-r25-19b-a3b-q4_k_m": 13.19
+    "CoE-Tiel-Coder-python-n1-55-19b-a3b-q4_k_xl": 13.39
+    "JThomas-CoE/coe-gemma4-python-hc-14b-a4b-q4_k_m": 10.40
+    # --- web domain ---
+    "JThomas-CoE/coe-qwen3.6-hc-coding_web-r25-19b-a3b-q4_k_m": 13.19
+    "JThomas-CoE/coe-gemma4-web-hc-14b-a4b-q4_k_m": 10.40
+    # --- compiled domain (single tag fills both roles) ---
+    "JThomas-CoE/coe-gemma4-coding-hc-14b-a4b-q4_k_m": 10.40
+    # --- math domain ---
+    "JThomas-CoE/coe-gemma4-math-hc-14b-a4b-q4_k_m": 10.40
+    "JThomas-CoE/coe-qwen3.6-mmlu_pro-math-r31-19b-a3b-q4_k_m": 13.19
+    # --- physics domain ---
+    "JThomas-CoE/coe-qwen3.6-mmlu_pro-physics-r31-19b-a3b-q4_k_m": 13.19
+    "JThomas-CoE/coe-gemma4-physics-mmlu_pro-14b-a4b-q4": 10.40
+
+clean_resolution:
+  # Domain confidence floor (user ruling 2026-09-04): a domain below this
+  # confidence falls to domain_other. Wired into the router post-probe
+  # merge (previously loaded but never consumed).
+  min_domain_confidence: 0.80
+  # Router probe policy (user ruling 2026-09-04): per-field scoping.
+  #   lock_threshold    : confidence >= this => field locked, probe never changes it
+  #   band_low          : fields below this are NOT probe-eligible; they fall
+  #                       to defaults (domain_other / general_use / SDST)
+  #   override_min_gain : a probe-eligible field changes only if the re-eval's
+  #                       confidence >= original + gain
+  #   trivial_threshold : trivial=true iff trivial_confidence > this; trivial is
+  #                       NEVER probe-eligible
+  router_probe:
+    lock_threshold: 0.80
+    band_low: 0.65
+    override_min_gain: 0.05
+    trivial_threshold: 0.80
+  closed_think_default: true
+  # domain_aliases removed — the router emits domain_<name> directly;
+  # the matrix looks up by domain_<name>. No alias mapping needed.
+
+  # Persona registry.  Each domain row's `persona:` is a KEY into this
+  # dict.  The persona is injected into the harness system prompt as the
+  # model's role.  Personas reflect an actual ROLE (e.g. "python_coder",
+  # "mathematics_assistant"), not a bare topic.
+  #
+  # === HOW TO REGISTER A NEW DOMAIN ===
+  # Adding a domain requires ALL of the following, or the matrix will not
+  # route to it correctly:
+  #   1. A `domain_rows.<domain_name>` entry with:
+  #        persona:        the persona KEY (must exist in `personas:` below)
+  #        primary_model_ref / secondary_model_ref: model refs (see the
+  #                        `models:` block) for the specialist slots
+  #        task_harnesses: which canonical harnesses the domain exposes.
+  #                        Coding domains (python/web/compiled): all 5
+  #                        (new_code_generation, bug_fix, modify_artifact,
+  #                        evaluate_artifact, general_use).  Non-coding
+  #                        domains: modify_artifact, evaluate_artifact,
+  #                        general_use.
+  #        description:    one-line anchor of what the domain represents,
+  #                        injected into the router system prompt so the
+  #                        classifier can ground its choice.
+  #        include_topics: keywords that SHOULD nudge routing to this
+  #                        domain (steering, not a hard gate).
+  #        exclude_topics: keywords that SHOULD nudge routing AWAY from
+  #                        this domain (steering, not a hard gate).
+  #   2. A matching `personas.<persona_key>` role text.
+  #   3. Any new model_refs used above must exist in `models:`.
+  # The router's closed-domain list and the matrix are BOTH derived from
+  # `domain_rows` keys, so a new domain automatically appears in the
+  # router's allowed-domain list once the row is added.
+  personas:
+    general_assistant: "You are a general assistant. Answer directly and accurately."
+    python_coder: "You are a Python programming assistant. Your priorities, in order: correct behavior including edge cases such as empty and boundary inputs; following the names, signatures and behavior the request specifies; clear, idiomatic code."
+    web_coder: "You are a web coding assistant. Provide complete, production-ready frontend/browser solutions."
+    compiled_coder: "You are a compiled-language coding assistant. Provide correct, idiomatic C/C++/Rust/Go/Java solutions."
+    mathematics_assistant: "You are a mathematics assistant. Provide rigorous derivations and clear step-by-step reasoning."
+    physics_assistant: "You are a physics assistant. Provide clear derivations and standard notation."
+
+  # === TAG REGISTRY ===
+  # The matrix (domain_rows) names TAGS only (model:python-a).  Each tag
+  # here maps to the real model the backend runs.  The tag name is the
+  # model call name the backend uses (register the real model in Ollama
+  # under the tag name via `ollama cp <hf-repo> <tag>`).
+  #
+  # Default binding: -a = primary, -b = secondary (free-form; the user may
+  # assign any tag to any role).  python-c is gemma4-python, used as the
+  # bug_fix primary.  Each tag declares a bounded num_ctx so the VRAM
+  # manager can always force a smaller context, even after Ollama's 262k
+  # default would otherwise be locked in for a resident model.
+  model_refs:
+    # Inline model_id values use the PUBLIC HF release names
+    # (JThomas-CoE/<repo>).  THIS file is now the SOLE binding layer for
+    # tag -> model: config.py in this tree reads config.yaml and nothing
+    # else.  To re-point a tag at a different local root, edit the
+    # `model_id` below.
+    #
+    # [FLAGGED FALSE as of 2026-09-22]  The following sentence stood here
+    # and is superseded.  Quoted VERBATIM so the correction is auditable:
+    #
+    #     model_assignment.yaml remains the binding layer: it maps each tag
+    #     to the model the local backend actually calls, so a user whose
+    #     local roots differ can rebind without touching the matrix.  When
+    #     the two agree, the merge is a no-op.
+    #
+    # CORRECTED STATEMENT (2026-09-22).  `model_assignment.yaml` has been
+    # DELETED from this tree on user ruling (it was an unused analog of
+    # this block).  Evidence: the deleted file's 10 `tags[].model` values
+    # were byte-identical to the `model_id` values below, and its
+    # `router`/`generalist` blocks (`qwen3.5:4b`, `gemma4:12b`) duplicated
+    # `models.router`, `models.router_fallback` and
+    # `models.general_fallback`.  Its `backend` key was null, so the
+    # merge's backend injection was also a no-op ({'type': 'ollama'}
+    # either way).  Nothing is lost by the deletion.
+    #
+    # The claim "When the two agree, the merge is a no-op" was true only
+    # of a tree whose inline ids are current.  Do NOT generalise it: in
+    # `CoE-coder-16GB-release\CoE_coder_16GB` the inline ids are still
+    # stale (`coe-svdv2-*`, `jthomas/*`), so there the merge is
+    # LOAD-BEARING and that tree's assignment file must not be deleted.
+    # That tree is superseded by the relocatable build and is not the
+    # shipped artifact.
+    # [renamed 2026-09-22] The tree was renamed to
+    # `CoE-coder-16GB-release-SUPERSEDED` so it can no longer be mistaken for the
+    # release payload, and it is EXCLUDED from the build. The payload is built from
+    # the dev tree (`CoE_agent/CoE_coder_16GB`).
+    #
+    # Checkpoint: CoE_agent/_checkpoints/model_assignment_delete_pre_20260922_115623
+    # --- python ---
+    python-a: { model_id: "JThomas-CoE/coe-qwen3.6-hc-coding_python-r25-19b-a3b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: true, vision: true }
+    python-b: { model_id: "CoE-Tiel-Coder-python-n1-55-19b-a3b-q4_k_xl", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: true, raw_prefill: true, vision: true }
+    python-c: { model_id: "JThomas-CoE/coe-gemma4-python-hc-14b-a4b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: false, vision: true }
+    # --- web ---
+    web-a: { model_id: "JThomas-CoE/coe-qwen3.6-hc-coding_web-r25-19b-a3b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: true, vision: true }
+    web-b: { model_id: "JThomas-CoE/coe-gemma4-web-hc-14b-a4b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: false, vision: true }
+    # --- compiled (no qwen3.6 compiled model exists; one tag, used for both roles) ---
+    compiled-a: { model_id: "JThomas-CoE/coe-gemma4-coding-hc-14b-a4b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: false, vision: true }
+    # --- math ---
+    math-a: { model_id: "JThomas-CoE/coe-gemma4-math-hc-14b-a4b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: false, vision: true }
+    math-b: { model_id: "JThomas-CoE/coe-qwen3.6-mmlu_pro-math-r31-19b-a3b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: true, vision: true }
+    # --- physics ---
+    physics-a: { model_id: "JThomas-CoE/coe-qwen3.6-mmlu_pro-physics-r31-19b-a3b-q4_k_m", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: true, vision: true }
+    physics-b: { model_id: "JThomas-CoE/coe-gemma4-physics-mmlu_pro-14b-a4b-q4", provider: ollama, num_ctx: 32768, num_predict: 24576, keep_alive: 300, think: false, raw_prefill: false, vision: true }
+    # --- cloud T3 targets (informational) ---
+    # The T3 cloud target is NOT selected from these refs.  The live
+    # contract is backends.cloud: model_id for text-only requests,
+    # vision_model_id for image-bearing requests (attachment-conditional
+    # selection; there are no cloud primary/secondary roles).  Kept as a
+    # reference mirror of the backends.cloud values.
+    cloud_text: { model_id: "deepseek-v4.1-flash:cloud", provider: cloud }
+    cloud_vision: { model_id: "deepseek-v4.1-flash:cloud", provider: cloud }
+    # --- not yet wired to a domain (kept for reference) ---
+
+  domain_rows:
+    domain_python:
+      persona: python_coder
+      description: "Python development: scripting, functions/classes, async, web frameworks (FastAPI/Flask/Django), data processing, testing, tooling."
+      include_topics: [python, script, function, class, async, asyncio, fastapi, flask, django, pytest, pandas, numpy, decorator, dataclass]
+      exclude_topics: [c++, rust, go, java, javascript, typescript, html, css, sql, docker, kubernetes]
+      primary_model_ref: model:python-b
+      secondary_model_ref: model:python-a
+      task_harnesses: { new_code_generation: new_code_generation, bug_fix: bug_fix, modify_artifact: modify_harness, evaluate_artifact: evaluate_artifact, general_use: general_use }
+      task_cells:
+        # Think-state-dependent role ordering.  The request's effective think
+        # state selects the branch; default (think-off) = qwen primary / ornith
+        # secondary.  /thinkon promotes ornith to primary.  Never changes how a
+        # model behaves -- think mode is fixed by each model's default.
+        new_code_generation:
+          think_off: { primary_model_ref: model:python-a, secondary_model_ref: model:python-b }
+          think_on:  { primary_model_ref: model:python-b, secondary_model_ref: model:python-a }
+        # bug_fix primary is python-c (gemma4-python), NOT python-a.  This
+        # demonstrates the free-form tag binding: any tag may fill any role.
+        # Secondary is python-b (ornith n1-55).
+        bug_fix: { primary_model_ref: model:python-c, secondary_model_ref: model:python-b }
+    domain_compiled:
+      persona: compiled_coder
+      description: "Compiled systems languages: C, C++, Rust, Go, Java, Kotlin, Scala — systems, algorithms, data structures, performance."
+      include_topics: [c, cpp, c++, rust, go, java, kotlin, scala, pointer, memory, algorithm, data structure, systems, concurrency]
+      exclude_topics: [python, javascript, html, css, react, sql]
+      # No qwen3.6 compiled model exists; the single compiled-a tag fills
+      # BOTH primary and secondary roles.  The harness is slot-agnostic, so
+      # primary == secondary is valid (secondary re-runs the same model).
+      primary_model_ref: model:compiled-a
+      secondary_model_ref: model:compiled-a
+      task_harnesses: { new_code_generation: new_code_generation, bug_fix: bug_fix, modify_artifact: modify_harness, evaluate_artifact: evaluate_artifact, general_use: general_use }
+      task_cells:
+        new_code_generation: { primary_model_ref: model:compiled-a, secondary_model_ref: model:compiled-a }
+        bug_fix: { primary_model_ref: model:compiled-a, secondary_model_ref: model:compiled-a }
+    domain_web:
+      persona: web_coder
+      description: "Frontend and browser development: HTML, CSS, JavaScript/TypeScript, React/Vue, responsive design, accessibility, DOM."
+      include_topics: [html, css, javascript, typescript, jsx, tsx, react, vue, svelte, nodejs, frontend, responsive, accessibility, dom, tailwind]
+      exclude_topics: [python, c++, rust, go, java, database schema, backend api, ml engineering]
+      primary_model_ref: model:web-a
+      secondary_model_ref: model:web-b
+      task_harnesses: { new_code_generation: new_code_generation, bug_fix: bug_fix, modify_artifact: modify_harness, evaluate_artifact: evaluate_artifact, general_use: general_use }
+      task_cells:
+        new_code_generation:
+          primary_model_ref: model:web-a
+          secondary_model_ref: model:web-b
+          assistant_prefill: null
+        bug_fix: { primary_model_ref: model:web-a, secondary_model_ref: model:web-b }
+        modify_artifact: { primary_model_ref: model:web-a, secondary_model_ref: model:web-b }
+        evaluate_artifact: { primary_model_ref: model:web-a, secondary_model_ref: model:web-b }
+    domain_math:
+      persona: mathematics_assistant
+      description: "Mathematics: arithmetic, algebra, geometry, trig, calculus, probability/statistics, number theory, proofs, word problems."
+      include_topics: [arithmetic, algebra, factoring, equation, inequality, geometry, trig, calculus, derivative, integral, probability, statistics, combinatorics, number theory, sequence, series, proof, word problem]
+      exclude_topics: [python, c++, rust, go, java, web, html, sql, medical diagnosis, legal]
+      primary_model_ref: model:math-a
+      secondary_model_ref: model:math-b
+      task_harnesses: { general_use: general_use }
+    domain_physics:
+      persona: physics_assistant
+      description: "Physics: mechanics, electromagnetism, thermodynamics, waves, optics, relativity, quantum — equations and physical reasoning."
+      include_topics: [force, motion, momentum, energy, work, electricity, magnetism, circuit, thermodynamics, heat, wave, optics, light, relativity, quantum, kinematic, newton]
+      exclude_topics: [python, c++, rust, go, java, html, sql, medical diagnosis, legal]
+      primary_model_ref: model:physics-a
+      secondary_model_ref: model:physics-b
+      task_harnesses: { general_use: general_use }
+    # domain_other is the generalist catch-all.  Requests routed here
+    # (explicitly, or because the router emitted a domain that is not
+    # in this matrix) run on the generalist model.  It is NOT
+    # restricted to the general_use harness: artifact-aware task types
+    # use their real canonical harnesses (modify_artifact /
+    # evaluate_artifact), driven by the generalist model.  Only
+    # code-generation task types (new_code_generation / bug_fix) map
+    # to general_use, because the generalist has no coding-specialist
+    # harness here.  When a new coding domain (python/compiled/web)
+    # is added it should expose all 5 canonical harnesses; a new
+    # non-coding domain should expose modify_artifact,
+    # evaluate_artifact, and general_use.
+    domain_other:
+      persona: general_assistant
+      description: "General-purpose and catch-all domain for requests not covered by the specialist domains — general reasoning, planning, synthesis, question answering."
+      include_topics: [general, reasoning, planning, synthesis, explain, summarize, question, research]
+      exclude_topics: [python, web, compiled, math, physics]
+      primary_model_ref: generalist
+      secondary_model_ref: generalist
+      task_harnesses: { general_use: general_use, new_code_generation: general_use, bug_fix: general_use, modify_artifact: modify_harness, evaluate_artifact: evaluate_artifact }
+      task_cells: {}
+
+  # The 3 rejection templates for non-SDST task scopes.  These are
+  # server-side responses, NOT harnesses.  They are routed to by
+  # the matrix's resolve() path BEFORE the matrix is consulted.
+  rejection_messages:
+    single_domain_multi_task:
+      code: task_scope_rejected_sdmt
+      severity: error
+      message: |
+        The router determined your request is single-domain-multi-task
+        (SDMT). This scope is not currently supported. Please decompose
+        your request into N independent single-domain-single-task units
+        of work, where each unit targets exactly one domain and one task
+        type. Submit each unit as a separate request.
+    multi_domain_single_task:
+      code: task_scope_rejected_mdst
+      severity: error
+      message: |
+        The router determined your request is multi-domain-single-task
+        (MDST). This scope is not currently supported. Please decompose
+        your request into N independent single-domain-single-task units
+        of work, where each unit targets exactly one domain and one task
+        type. Submit each unit as a separate request.
+    multi_domain_multi_task:
+      code: task_scope_rejected_mdmt
+      severity: error
+      message: |
+        The router determined your request is multi-domain-multi-task
+        (MDMT). This scope is not currently supported. Please decompose
+        your request into N independent single-domain-single-task units
+        of work, where each unit targets exactly one domain and one task
+        type. Submit each unit as a separate request.
+
+  harnesses:
+      # ── The 5 canonical harnesses ──
+      # Each harness is the protocol for one task type. Defined once,
+      # shared across all domains that use it. Per-cell runtime_overrides
+      # tune the harness's surfaced parameters for each (domain, task_type) node.
+      #
+      # Voice convention:
+      #   system_suffix = second person (system → model)
+      #   assistant_prefill = first person (model's own voice)
+      #   re_roll_modifiers = second person (system → model)
+      #   JSON prefills = structural (no voice)
+      #
+      # Placeholder convention:
+      #   {{domain_tag}} = domain name with "domain_" stripped (e.g., "python", "physics")
+      #   {{fence_language}} = actual fence language from T0's code block (runtime-detected)
+      #   {{domain_tag}} is NOT used in general_use (generic fallback).
+    
+      general_use:
+        family: general_use
+        tiers: [T0]
+        closed_think: false
+        assistant_prefill: null
+        sampling: { temperature: 0.6, top_k: -1, top_p: 1.0, repeat_penalty: 1.05, repeat_last_n: 1024, num_ctx: 32768, num_predict: 24576 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 0
+            user_modifier: null
+            artifact_contract: null
+            functional_errors: []
+          # 2026-09-13 (user ruling): the old `pathology_budget` block was
+          # REMOVED here.  No code read it: the runtime resolves the
+          # pathology budget from `runtime.pathology` ONLY.  It duplicated
+          # max_re_rolls_per_model / re_roll_seed_strategy / errors and also
+          # carried restart_policy, functional_count_reset and
+          # pathology_count_reset, which no code reads at all -- so editing
+          # it changed nothing and it had already drifted out of sync.  The
+          # behaviour those keys described is now implemented in code (the
+          # per-slot budget reset in the tier loop, fresh-seed rerolls).
+          meta_harness_ladder: null
+        runtime:
+          primitives: [dither_guard, repetition_loop_guard]
+          dither_pattern: "(?i)\\b(?:wait|actually|hmm|sorry|instead|reconsider(?:ing|s|ed)?|re-?examin(?:e|ing|ed)|but\\s+wait|on\\s+(?:second\\s+)?thought|let\\s+me\\s+(?:re-?think|re-?do|try\\s+again|reconsider))\\b"
+          dither_limit: 35
+          loop_guard_min: 1400
+          loop_guard_skip: 1400
+          loop_guard_match: 100
+          # 2026-09-10 (user ruling): window raised 400 -> 1000 code-base-wide.
+          # The 2026-09-10 capture showed a T2 diff-hunk loop with a 351-char
+          # period that the 400-char window missed by 51 chars (the guard's
+          # proximity lookahead is window - match).  1000 covers the observed
+          # short-period class with margin; the >=3-count gate retains the
+          # 2026-09-07 asc/desc false-positive protection.
+          loop_guard_window: 1000
+          retry_new_seed: true
+          pathology:
+            max_re_rolls_per_model: 2
+            re_roll_seed_strategy: random_per_model
+            errors: [dither, loop, first_token_timeout, slow_decode_timeout, vram_breach, token_exhaustion, backend_error, empty_response]
+          stream_primitives:
+            fence_counter:
+              check_cadence_chunks: -1
+            dither_check:
+              check_cadence_chunks: 25
+            loop_check:
+              check_cadence_chunks: 25
+          timers:
+            first_token_timeout_s: 60.0
+            slow_decode_timeout_s: 90.0
+            cold_load_first_token_timeout_s: 75.0
+            pathology_safety_factor: 2.5
+          re_roll_modifiers:
+            dither: "Your previous response contained excess dithering. On this attempt: be concise, commit to your answer, and do not second-guess yourself. Reach your final answer and stop."
+            loop: "Your previous response contained a repetition loop. On this attempt: be concise and do not repeat the same phrases. Reach your final answer and stop."
+          max_calls_per_instance: 12
+        parameter_ranges:
+          sampling.temperature: [0.0, 2.0]
+          sampling.num_predict: [512, 32768]
+          pathology.max_re_rolls_per_model: [0, 10]
+          dither_limit: [1, 100]
+          loop_guard_min: [100, 5000]
+          loop_guard_skip: [100, 5000]
+          loop_guard_match: [10, 500]
+          loop_guard_window: [50, 2000]
+          max_calls_per_instance: [1, 50]
+          timers.first_token_timeout_s: [10.0, 300.0]
+          timers.slow_decode_timeout_s: [10.0, 600.0]
+          timers.cold_load_first_token_timeout_s: [10.0, 600.0]
+        system_suffix: "You are a helpful and competent assistant. Answer the user's prompt with accuracy and concision."
+    
+      new_code_generation:
+        family: new_code_generation
+        tiers: [T0, T1a, T1b, T2]
+        closed_think: true
+        assistant_prefill: |-
+          I need to work through this task carefully and be concise. I may use a draft code block to reason inline with comments, but my answer will be a complete, closed final code block, and then I will stop.
+
+          I will now start by creating an opening code block fence for the coding language called for by the user request.
+
+          ```
+        sampling: { temperature: 0.6, top_k: -1, top_p: 1.0, repeat_penalty: 1.05, repeat_last_n: 1024, num_ctx: 32768, num_predict: 24576, seed: 42 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            artifact_contract: new_code_generation
+            functional_errors: [syntax_error, no_code_fence, incomplete_fence]
+          t1a:
+            model_slot: primary
+            seed_policy: same_as_t0
+            functional_budget: 1
+            user_modifier: |
+              The previous code block failed functional validation with this error:
+              {t0_error}
+    
+              Here is the previous code block:
+    
+              ```{{fence_language}}
+              {t0_code}
+              ```
+    
+              Produce a unified diff that fixes the error. Wrap the diff in
+              a <patch>...</patch> block. Do not regenerate the entire code
+              block — emit only the smallest possible change that fixes the error.
+            artifact_contract: unified_diff_patch
+            functional_errors: [empty_patch, malformed_patch, multiple_patches, patch_empty_diff, patch_does_not_apply]
+            apply_policy:
+              apply_target: t0_code
+              apply_mechanism: modify_artifact_deterministic_reintegration
+          t1b:
+            model_slot: primary
+            seed_policy: same_as_t0
+            functional_budget: 1
+            user_modifier: |
+              The model's generated code has the following error trace:
+              {prior_error}
+    
+              Regenerate the code without the error.
+            artifact_contract: new_code_generation
+            functional_errors: [syntax_error, no_code_fence, incomplete_fence]
+          t2:
+            model_slot: secondary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            artifact_contract: new_code_generation
+            functional_errors: [syntax_error, no_code_fence, incomplete_fence]
+            nested_ladder:
+              t1a:
+                model_slot: secondary
+                seed_policy: same_as_t0_t2
+                functional_budget: 1
+                user_modifier: |
+                  The previous code block failed functional validation with this error:
+                  {t0_error}
+    
+                  Here is the previous code block:
+    
+                  ```{{fence_language}}
+                  {t0_code}
+                  ```
+    
+                  Produce a unified diff that fixes the error. Wrap the diff in
+                  a <patch>...</patch> block. Do not regenerate the entire code
+                  block — emit only the smallest possible change that fixes the error.
+                artifact_contract: unified_diff_patch
+                functional_errors: [empty_patch, malformed_patch, multiple_patches, patch_empty_diff, patch_does_not_apply]
+                apply_policy:
+                  apply_target: t0_code
+                  apply_mechanism: modify_artifact_deterministic_reintegration
+              t1b:
+                model_slot: secondary
+                seed_policy: same_as_t0_t2
+                functional_budget: 1
+                user_modifier: |
+                  The model's generated code has the following error trace:
+                  {prior_error}
+    
+                  Regenerate the code without the error.
+                artifact_contract: new_code_generation
+                functional_errors: [syntax_error, no_code_fence, incomplete_fence]
+          meta_harness_ladder:
+            # T3 cloud first (pennies, ~1-3 min, SOTA quality for the
+            # hard core local cannot converge on), T5 local generalist
+            # as the free last resort.  cloud_sota silently skips when
+            # backends.cloud is disabled (released default).
+            targets: [cloud_sota, generalist_zero_shot]
+            # D2/D3/D4 (2026-08-29): cloud escalation policy.
+            # on_failure: hard_stop = a failed T3 ENDS the request; no
+            #   T5 fallthrough (local generalist after cloud failure is
+            #   a wasted multi-minute attempt).
+            # silence_timeout_s: in-attempt dead-air limit.  A cloud
+            #   stream silent this long is recorded as a failed attempt
+            #   (cloud_silence_timeout) instead of being cancelled by
+            #   the outer SSE watchdog.
+            #
+            #   2026-09-19 (PLAN_progress_mechanism.md phase 11): 600 -> 240.
+            #   The old rationale was "cloud may queue/cold-start far longer
+            #   than a local model, so this sits well above the local 330s
+            #   watchdog".  That reasoning no longer holds: the SSE watchdog
+            #   now EXEMPTS cloud tiers entirely (server.py), so cloud silence
+            #   is owned by THIS key and by total_timeout_s alone and no longer
+            #   needs to out-rank a local watchdog.
+            #
+            #   240s is a deliberate FAILURE threshold, not a reporting
+            #   cadence: it must stay above the longest LEGITIMATE stream gap,
+            #   and `reasoning_effort: high` means multi-minute reasoning
+            #   pauses are real.  Progress VISIBILITY is the separate 30s
+            #   cadence (progress_interval_s); do NOT lower this key to 30 to
+            #   try to get faster updates -- that would kill healthy calls.
+            #
+            #   Safe to lower without touching the output budget: max_tokens is
+            #   set EXPLICITLY below, which overrides the
+            #   tokens_per_sec * total_timeout_s derivation.  total_timeout_s
+            #   is unchanged at 600.
+            #
+            #   null = no dead-air limit.
+            # total_timeout_s: hard wall-clock cap for the WHOLE cloud
+            #   attempt (not just a silent gap).  Guards against a
+            #   runaway cloud request burning unbounded wall time.
+            #   null = unlimited.
+            # think: cloud reasoning-depth hint sent as reasoning_effort.
+            #   null = provider default; bool true/false; or a string
+            #   low/medium/high.
+            # max_tokens: explicit cloud output contract, DERIVED as
+            #   tokens_per_sec * total_timeout_s (so the cloud gets
+            #   exactly as many tokens as it can produce within its wall
+            #   budget at a configured rate).  null = provider default.
+            #   Explicit int override wins if set.
+            # tokens_per_sec: assumed cloud decode rate used to derive
+            #   max_tokens when max_tokens is not explicitly set.
+            # cloud_guards (2026-08-30): CLOUD-SPECIFIC dither/loop guard
+            #   tunings, DISTINCT from the local pruned-model thresholds.
+            #   Cloud serving hard problems may dither/loop differently
+            #   than a pruned local MoE, so these are separate keys.
+            cloud:
+              on_failure: hard_stop
+              silence_timeout_s: 240
+              total_timeout_s: 600
+              # 2026-09-09 (user ruling): cloud reasoning effort is a
+              # SEPARATE parameter from the local think on/off policy.
+              # Values: "low" | "medium" | "high" (OpenAI-style
+              # reasoning_effort). The local think flag NEVER maps onto
+              # this. low-effort was implicated in prose-preamble leakage
+              # on the 2026-09-09 T3 modify call; "high" keeps reasoning
+              # in the model's thinking span so the answer channel stays
+              # clean JSON.
+              reasoning_effort: "high"
+              # 2026-08-31: max_tokens=50000 default (validated).  The
+              # reasoning channel eats budget; 50k leaves room for content.
+              max_tokens: 50000
+              tokens_per_sec: 150
+              # 2026-08-31: per-harness cloud prompts.  The cloud path is
+              # harness-aware: it selects the prompt by work.harness.harness_id.
+              # Each is the validated concise contract for that harness.
+              prompts:
+                new_code_generation:
+                  system_suffix: "You are an expert programmer. Solve the coding request in the language it specifies, in a straightforward and concise manner. Avoid verbose and convoluted reasoning and/or explanations. A working solution is preferable to lengthy attempts to find the best or most optimized solution. Emit a single, properly fenced code block in that language and stop without further prose explanations or second guessing."
+                  output_instruction: "Respond with a single fenced code block in the language the request specifies, and nothing else."
+                bug_fix:
+                  system_suffix: "You are an expert python software engineer. You are given a GitHub issue and the relevant code slice from the repository. Produce a unified-diff patch that resolves the issue.\n\nEmit EXACTLY ONE <patch>...</patch> block containing a complete, well-formed unified diff. The patch MUST begin with `diff --git a/<path> b/<path>`, then `--- a/<path>` and `+++ b/<path>`, then at least one hunk header `@@ -<start>,<count> +<start>,<count> @@` using the ACTUAL line numbers from the provided code slice.\n\nBe concise. Do not reason at length. Emit the <patch> block and stop immediately after </patch>."
+                  output_instruction: "Return exactly one <patch>...</patch> block with a complete unified diff."
+                # 2026-09-18 (user ruling): the `modify_harness_legacy` entry that used to
+                # sit here was DELETED.  It was a stale duplicate: it still promised a
+                # "BM25 section index" and an "R2 JSON edit package", both superseded, and
+                # it could never be read anyway -- a modify request resolves its OWN
+                # harness, whose `cloud.prompts.<harness_id>` entry is what the runtime
+                # actually loads (`_prompts.get(_harness_id)`).  Nothing referenced it.
+
+                evaluate_artifact:
+                  system_suffix: "You are an artifact analysis assistant. The artifact content, structure, and section index are provided separately. Follow the user's request exactly. The user's requested answer target takes priority over the word \"evaluate\". Answer navigation and data-flow questions directly. Use section names and concise code references. Be concise, do not reason at length."
+                  output_instruction: "Answer the user's question about the artifact directly and concisely."
+              cloud_guards:
+                dither_enabled: true
+                # SHORTSTOP rule: evaluate the trailing shortstop_window chars of the
+                # cloud stream once its length exceeds shortstop_min_chars; if the
+                # dither-marker DENSITY in that window exceeds shortstop_rate, cut the
+                # request (it is dithering without committing).  Units are markers per
+                # CHAR of the trailing window -- NOT per 10k (2026-09-18 correction).
+                #
+                # 2026-09-18 (user ruling): 2.0 -> 100.0, and the redundant `* 1000`
+                # divisor in runtime.py removed so the unit is honest.
+                #   * 2.0 was calibrated against glm-5.3-flash on 20 held-out hard
+                #     qids (T=2.0, P=30000 -> 100% precision, 67% recall, 0 passing
+                #     qids cut).
+                #   * The shipped cloud model is now deepseek-v4.1-flash:cloud, whose
+                #     reasoning trace uses the dither markers as ordinary analytic
+                #     connectives, so a legitimate 44,423-char change-order attempt was
+                #     cut at 2.34.
+                #   * 100.0 makes the rule effectively NON-TRIPPING.  This is a
+                #     temporary DATA-GATHERING default, NOT a recalibration.
+                # RESET: README.md -> "Cloud dither guard recalibration".  All five
+                # cloud-bearing harnesses carry the same value deliberately.
+                shortstop_enabled: true
+                shortstop_rate: 100.0
+                shortstop_min_chars: 30000
+                shortstop_window: 10000
+                # 2026-08-30: HIGH dither limit so the guard does NOT
+                # truncate the cloud stream before its full bimodal time
+                # evolution develops (local bimodal data showed the danger
+                # is a LATE dense-spike, not an early count).  Runaway
+                # protection is instead handled by the time/token caps:
+                #   total_timeout_s = hard wall-clock stop
+                #   max_tokens (derived = tokens_per_sec * total_timeout_s)
+                # A limit this high effectively never trips on dither; the
+                # dither COUNT is still logged per T3 for density analysis.
+                dither_limit: 10000
+                dither_limit_think_scale: 3
+                dither_pattern: "(?i)\\b(?:wait|actually|hmm|sorry|instead|reconsider(?:ing|s|ed)?|re-?examin(?:e|ing|ed)|but\\s+wait|on\\s+(?:second\\s+)?thought|let\\s+me\\s+(?:re-?think|re-?do|try\\s+again|reconsider))\\b"
+                loop_enabled: false
+                loop_guard_min: 2000
+                loop_guard_skip: 2000
+                loop_guard_match: 100
+                # 2026-09-10 (user ruling): window 400 -> 1000 code-base-wide.
+                loop_guard_window: 1000
+          # 2026-09-13 (user ruling): dead `pathology_budget` block REMOVED
+          # (no code reads it; `runtime.pathology` is the live source).
+        runtime:
+          primitives: [dither_guard, repetition_loop_guard]
+          dither_pattern: "(?i)\\b(?:wait|actually|hmm|sorry|instead|reconsider(?:ing|s|ed)?|re-?examin(?:e|ing|ed)|but\\s+wait|on\\s+(?:second\\s+)?thought|let\\s+me\\s+(?:re-?think|re-?do|try\\s+again|reconsider))\\b"
+          dither_limit: 35
+          # Think-on slots (e.g. ornith secondary) legitimately emit
+          # revision markers in their native reasoning trace.  Multiply
+          # the dither limit by this scale when the slot is think-on so
+          # the guard does not cut off a think-on model mid-reasoning.
+          dither_limit_think_scale: 3
+          loop_guard_min: 1400
+          loop_guard_skip: 1400
+          loop_guard_match: 100
+          # 2026-09-10 (user ruling): window raised 400 -> 1000 code-base-wide.
+          loop_guard_window: 1000
+          # Rate-stall gate (StallMonitor, added 2026-08-27).  Catches
+          # streams that go silent mid-attempt (rate_stall: zero output
+          # for zero_k consecutive 60s windows) or grind down to <30%
+          # of their own median active rate for partial_k consecutive
+          # windows (rate_collapse).  Derived from the 14-stream
+          # profiling run lcb_clean75_coe_20260827_152115: all 5
+          # terminal runaways stall (240-330s of dead air); PASS
+          # streams never go silent except transiently (80s max).
+          # zero_k=2 spares the observed 80s recovery while catching
+          # every runaway.  Set stall.enabled: 0 to disable.
+          stall:
+            enabled: 1
+            window_s: 60
+            arm_windows: 1
+            arm_min_chars: 300
+            zero_k: 2
+            partial_ratio: 0.30
+            partial_k: 4
+            reset_ratio: 0.50
+          artifact_contract: new_code_generation
+          retry_new_seed: true
+          # Output ceiling (2026-08-29): convergence-failure proxy.  When a
+          # single attempt generates > max_chars (or the CUMULATIVE output
+          # across all of this problem's attempts exceeds max_total_chars),
+          # the attempt is classified output_ceiling_exceeded -- a pathology
+          # (budgeted reroll / escalation).  Scope declaration of the black
+          # box: single-domain/single-task subagent.  2026-08-29 tuning:
+          # raised 20k/30k -> 75k/125k (75k covers deep-think VL answers;
+          # 125k cumulative catches hard-problem grinders; the transport
+          # -test calibration 20k/30k truncated productive think-on runs).
+          # README TUNE FLAG: per-deployment values; list under "Local
+          # tuning knobs" in the release README.
+          output_ceiling:
+            enabled: 1
+            max_chars: 75000
+            max_total_chars: 125000
+            # 2026-08-30: held-out minimum char budget for the secondary
+            # slot.  The primary's cumulative ceiling is effectively
+            # (max_total_chars - min_secondary_chars) so the secondary
+            # always gets >= this many chars when it escalates.  The
+            # global max_total_chars stays a hard cap on the TOTAL.
+            min_secondary_chars: 25000
+          pathology:
+            max_re_rolls_per_model: 2
+            re_roll_seed_strategy: random_per_model
+            errors: [dither, loop, first_token_timeout, slow_decode_timeout, vram_breach, token_exhaustion, backend_error, empty_response, no_code_fence_unclosed, cancelled, rate_stall, rate_collapse, prepare_timeout, output_ceiling_exceeded]
+          stream_primitives:
+            fence_counter:
+              check_cadence_chunks: 25
+              tail_after_close_without_reopen_chunks: 200
+              contract_on_truncate: new_code_generation
+              fence_languages: [python, py, cpp, c++, cxx, rust, rs, go, golang, java, kotlin, kt, scala, c, html, htm]
+            dither_check:
+              check_cadence_chunks: 25
+            loop_check:
+              check_cadence_chunks: 25
+          timers:
+            first_token_timeout_s: 60.0
+            slow_decode_timeout_s: 90.0
+            cold_load_first_token_timeout_s: 75.0
+            pathology_safety_factor: 2.5
+          re_roll_modifiers:
+            dither: "Your previous response on this task contained excess dithering. On this attempt: be concise, commit to your answer, and do not second-guess yourself. Reach the FINAL block and stop."
+            loop: "Your previous response on this task contained a repetition loop. On this attempt: be concise, commit to your answer, and do not repeat the same phrases. Reach the FINAL block and stop."
+          max_calls_per_instance: 12
+        parameter_ranges:
+          sampling.temperature: [0.0, 2.0]
+          sampling.num_predict: [512, 32768]
+          pathology.max_re_rolls_per_model: [0, 10]
+          dither_limit: [1, 100]
+          loop_guard_min: [100, 5000]
+          loop_guard_skip: [100, 5000]
+          loop_guard_match: [10, 500]
+          loop_guard_window: [50, 2000]
+          max_calls_per_instance: [1, 50]
+          timers.first_token_timeout_s: [10.0, 300.0]
+          timers.slow_decode_timeout_s: [10.0, 600.0]
+          timers.cold_load_first_token_timeout_s: [10.0, 600.0]
+        system_suffix: "You may use a draft code block to work through the problem, keeping any reasoning inside inline comments. Your reply must contain at least one complete, closed code block. The last closed code block in your reply is taken as your answer. Make that final block self-contained, keeping the original imports and any helper functions the prompt already defines. Prefer a clean final block with minimal comments."
+        output_instruction: ""
+        # Think-state-aware suffix.  When the slot's model is think-on, the
+        # model reasons natively in its think span; it must NOT be asked to
+        # write a DRAFT block with inline reasoning (that caused double-
+        # reasoning and runaway on think-on models).  Instead emit a single
+        # clean FINAL code block.
+        system_suffix_thinkon: "You are a competent {{domain_tag}} language programmer. Reason through the problem in your native thinking, then output exactly ONE clean fenced code block in that language containing the complete solution. No prose outside the code block."
+        output_instruction_thinkon: "Output exactly ONE clean fenced code block, in the language the request specifies, with the complete solution. No prose, no draft block -- only the final code."
+    
+      # 2026-10-03 A/B: lean prompt inside CoE.  python row only; shared new_code_generation untouched.
+      new_code_generation_lean:
+        extends: new_code_generation
+        assistant_prefill: null
+        system_suffix: "Solve the task and return only the complete Python implementation in one ```python code block. Do not include analysis or explanation."
+        output_instruction: ""
+    
+      bug_fix:
+        family: bug_fix
+        tiers: [T0, T2]
+        closed_think: true
+        # The prefill opens a `<patch>` block so the model is
+        # conditioned to emit a unified-diff immediately rather
+        # than dithering in prose first.  Without this anchor
+        # the secondary (r25) frequently stalls on
+        # "let me work through this carefully..." and never
+        # reaches the patch format.  The leading `<patch>\n`
+        # is intentionally literal text — the model's first
+        # generated tokens will be `diff --git a/...`, which
+        # `extract_diff(..., take_last=True)` extracts as the
+        # patch body (the open `<patch>` tag is consumed by
+        # the regex).
+        #
+        # 2026-08-07: added by user request after observing
+        # r25 dither-to-timeout on django__django-10554.
+        #   v2 ("Let me start by writing a draft patch then
+        #       examine it and correct any errors before writing
+        #       a final clean patch") triggered two-block output
+        #       where the FIRST block was the correct fix and
+        #       the SECOND was a Bresenham-algorithm hallucination
+        #       that extract_diff(..., take_last=True) saved
+        #       instead.  Reverted because the take_last
+        #       extractor was picking the hallucination.
+        #   v3 ("I will start with a draft patch with full
+        #       reasoning inline as comments") had the same
+        #       take_last hallucination problem with even
+        #       longer Bresenham output.
+        #   v5 (current): keep ONLY the `<patch>` opening line.
+        #       Model emits a single `<patch>` block and
+        #       extract_diff() captures the actual fix.
+        #   v6 (2026-08-08): expanded by user request to a
+        #       self-review loop.  REVERTED -- the long paragraph
+        #       made the model echo the prefill back verbatim and
+        #       collapse the <patch> block structure (5 repeated
+        #       </patch> tags, valid=NO).  The self-review loop was
+        #       moved to the system_suffix instead (where the model
+        #       reads it without echoing it).  The prefill stays
+        #       minimal -- just the <patch> anchor.
+        #   v7 (2026-08-08): zero-shot single-try by user request.
+        #       REVERTED -- the single-try constraint (max_blocks=1)
+        #       dropped the pass rate (6->4 on the first 10).  Back to
+        #       the revised multi-patch flow (max_blocks=3).  The
+        #       func_errs merge (2 tries per model) and tightened
+        #       guards are kept.
+        # v14 (2026-08-10): FINAL test — both primary and secondary get the
+        # <patch> starter injected.  gemma_hc stays primary, qwen_r25 stays
+        # secondary.  This tests the 4th combo (both-with-patch) against:
+        #   gemma primary no patch / qwen secondary patch:  9/10 = 90% (congruent)
+        #   qwen primary no patch:     1/10 = 10%
+        #   qwen primary with patch:   3/10 = 30%
+        assistant_prefill: |-
+          Let me work through this carefully.
+        sampling: { temperature: 0.6, top_k: -1, top_p: 1.0, repeat_penalty: 1.05, repeat_last_n: 1024, num_ctx: 32768, num_predict: 24576 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            artifact_contract: unified_diff_patch
+            # v14 FINAL test (2026-08-10): primary (gemma_hc) WITH the
+            # <patch> starter injected — testing the both-with-patch combo.
+            assistant_prefill: |-
+              Let me work through this carefully.
+
+              <patch>
+            # v14 (2026-08-10): functional_errors congruent with the direct
+            # 62% run.  The direct run only treated empty_patch and
+            # malformed_patch as failures (triggering the exhaustion reset
+            # retry).  It did NOT reject on patch_empty_diff or
+            # patch_does_not_apply — it graded whatever the model emitted.
+            # Removing those prevents spurious re-rolls/escalation that the
+            # direct run never had.
+            functional_errors: [empty_patch, malformed_patch]
+          t2:
+            model_slot: secondary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            artifact_contract: unified_diff_patch
+            # v14 (2026-08-10): secondary (r25) keeps the `<patch>` anchor
+            # to prevent its prose-only dither pathology.
+            assistant_prefill: |-
+              Let me work through this carefully.
+
+              <patch>
+            # v14: congruent functional_errors (empty_patch, malformed_patch only).
+            functional_errors: [empty_patch, malformed_patch]
+          meta_harness_ladder:
+            targets: [cloud_sota]
+            cloud:
+              on_failure: hard_stop
+              silence_timeout_s: 240
+              total_timeout_s: 600
+              # 2026-09-09 (user ruling): separate from local think policy.
+              reasoning_effort: "high"
+              max_tokens: 50000
+              tokens_per_sec: 150
+              prompts:
+                bug_fix:
+                  system_suffix: "You are an expert python software engineer. You are given a GitHub issue and the relevant code slice from the repository. Produce a unified-diff patch that resolves the issue.\n\nEmit EXACTLY ONE <patch>...</patch> block containing a complete, well-formed unified diff. The patch MUST begin with `diff --git a/<path> b/<path>`, then `--- a/<path>` and `+++ b/<path>`, then at least one hunk header `@@ -<start>,<count> +<start>,<count> @@` using the ACTUAL line numbers from the provided code slice.\n\nBe concise. Do not reason at length. Emit the <patch> block and stop immediately after </patch>."
+                  output_instruction: "Return exactly one <patch>...</patch> block with a complete unified diff."
+              cloud_guards:
+                dither_enabled: true
+                shortstop_enabled: true
+                # 2026-09-18: 2.0 -> 100.0 (temporary data-gathering default; see the
+                # SHORTSTOP note under new_code_generation and README.md).
+                shortstop_rate: 100.0
+                shortstop_min_chars: 30000
+                shortstop_window: 10000
+                dither_limit: 10000
+                dither_limit_think_scale: 3
+                loop_enabled: false
+                loop_guard_min: 2000
+                loop_guard_skip: 2000
+                loop_guard_match: 100
+                # 2026-09-10 (user ruling): window 400 -> 1000 code-base-wide.
+                loop_guard_window: 1000
+          # 2026-09-13 (user ruling): dead `pathology_budget` block REMOVED
+          # (no code reads it; `runtime.pathology` is the live source).
+        runtime:
+          primitives: [dither_guard, repetition_loop_guard]
+          artifact_contract: unified_diff_patch
+          patch_apply_check: false
+          dither_pattern: "(?i)\\b(?:wait|actually|hmm|sorry|instead|reconsider(?:ing|s|ed)?|re-?examin(?:e|ing|ed)|but\\s+wait|on\\s+(?:second\\s+)?thought|let\\s+me\\s+(?:re-?think|re-?do|try\\s+again|reconsider))\\b"
+          dither_limit: 20
+          loop_guard_min: 500
+          loop_guard_skip: 400
+          loop_guard_match: 50
+          loop_guard_window: 320
+          retry_new_seed: true
+          pathology:
+            max_re_rolls_per_model: 8
+            re_roll_seed_strategy: random_per_model
+            errors: [dither, loop, first_token_timeout, slow_decode_timeout, vram_breach, token_exhaustion, backend_error, empty_response]
+          stream_primitives:
+            fence_counter:
+              check_cadence_chunks: -1
+            patch_block_counter:
+              check_cadence_chunks: 25
+              max_blocks: 1
+            dither_check:
+              check_cadence_chunks: 25
+            loop_check:
+              check_cadence_chunks: 25
+          timers:
+            first_token_timeout_s: 60.0
+            slow_decode_timeout_s: 90.0
+            cold_load_first_token_timeout_s: 75.0
+            pathology_safety_factor: 2.5
+          re_roll_modifiers:
+            dither: "Your previous response on this task contained excess dithering. On this attempt: be concise, commit to your answer, and do not second-guess yourself. Reach the FINAL block and stop."
+            loop: "Your previous response on this task contained a repetition loop. On this attempt: be concise, commit to your answer, and do not repeat the same phrases. Reach the FINAL block and stop."
+          max_calls_per_instance: 12
+        parameter_ranges:
+          sampling.temperature: [0.0, 2.0]
+          sampling.num_predict: [512, 32768]
+          pathology.max_re_rolls_per_model: [0, 10]
+          dither_limit: [1, 100]
+          loop_guard_min: [100, 5000]
+          loop_guard_skip: [100, 5000]
+          loop_guard_match: [10, 500]
+          loop_guard_window: [50, 2000]
+          max_calls_per_instance: [1, 50]
+          timers.first_token_timeout_s: [10.0, 300.0]
+          timers.slow_decode_timeout_s: [10.0, 600.0]
+          timers.cold_load_first_token_timeout_s: [10.0, 600.0]
+        system_suffix: |-
+          You are a competent {{domain_tag}} software engineer working on an existing codebase. You will be given a GitHub issue describing a problem to fix, plus relevant code from the repository. Produce a unified-diff patch that resolves the issue.
+
+          Working procedure:
+            1. Read the issue carefully.
+            2. Locate the file(s) and line numbers that need to change. The relevant
+               file contents are provided in the <code>...</code> block above; use
+               those line numbers verbatim when emitting hunk headers.
+            3. Optionally include a brief draft of inline analysis (plain prose)
+               BEFORE the <patch> block. This helps with multi-step reasoning.
+            4. Emit EXACTLY ONE <patch>...</patch> block containing a complete,
+               well-formed unified diff.
+
+          Required structure of the <patch> block:
+            - MUST begin with `diff --git a/<full/path> b/<full/path>`, where <full/path>
+              is the exact repository path (e.g. `diff --git a/django/conf/global_settings.py`).
+            - MUST then have `--- a/<path>` and `+++ b/<path>` lines (same path).
+            - MUST then have at least one hunk header `@@ -<start>,<count> +<start>,<count> @@`.
+              Use the ACTUAL line number where the change occurs. Do NOT use
+              `-1,1` or `-0,0` placeholders; these will not apply.
+            - MUST contain at most 3 lines of unchanged context before and after
+              each changed line. Keep hunks small (~5-10 lines total).
+            - MUST end with `</patch>`.
+
+          Rules:
+            - Emit EXACTLY ONE <patch> block, not multiple.
+            - Do NOT regenerate entire files; emit ONLY the changed lines plus minimal context.
+            - All reasoning/analysis must be OUTSIDE the <patch> tags (before them).
+            - Do NOT regenerate the example patch; produce ONLY the patch for the issue.
+            - The patch must apply cleanly with `git apply --whitespace=nowarn`.
+
+          Be concise with your reasoning before the patch. The grader extracts ONLY
+          the contents of <patch>...</patch> tags; all prose outside the tags is
+          discarded. Keep your reasoning under 1000 words before the patch --
+          longer thinking wastes tokens and risks truncation before the patch is emitted.
+
+          STRICT BUDGET:
+            - You have a reasoning budget of ~2,000 tokens (~8,000 characters) BEFORE
+              the <patch> block. Commit to your fix within that budget.
+            - Do NOT re-read the issue or re-verify your reasoning after starting the
+              patch. Once you begin the <patch> block, finish it.
+            - Do NOT add meta-commentary such as "Wait,", "I'm not sure", "Let me
+              reconsider", "Actually,", or "Hmm," more than ONCE in total. If you
+              find yourself starting a sentence with "Wait, I" a second time, you are
+              dithering -- STOP and write the patch immediately.
+            - After the closing `</patch>` tag, your response is COMPLETE. Do not
+              add explanations, summaries, or follow-up text after it.
+
+          PATCH FORMAT:
+            - Include 3 lines of UNCHANGED context above and below every change in every
+              hunk. Do NOT abbreviate context to save tokens -- the patch will fail to
+              apply if the line offsets don't match exactly.
+            - Show the FULL body of any function you modify. Do not replace a function
+              with a one-line stub and call it a fix.
+            - If a hunk's @@ header would be wider than 3 lines of context, split it
+              into multiple smaller hunks rather than dropping the context.
+        output_instruction: "Return exactly one <patch>...</patch> block with a complete unified diff. The grader takes the single block; the stream is truncated after the first </patch>."
+    
+      modify_harness_legacy:
+        family: modify_harness_legacy
+        tiers: [T0, T2]
+        closed_think: true
+        # ================================================================
+        # HARNESS CAPABILITY PROPERTIES.
+        # ================================================================
+        # These mirror the four fields on CleanHarnessSpec in resolution.py.
+        # They exist so the identity tests scattered through runtime.py
+        # (`harness_id == "modify_artifact"`) can be re-expressed as
+        # PROPERTIES, which is what lets a second modify harness exist at all.
+        #
+        # TWO DISTINCT LAYERS (this is the whole point of having two flags):
+        #
+        #   local_change_order  -- THIS harness's LOCAL tier emits a change
+        #                          order.  True here: the ladder's contract is
+        #                          `modify_artifact_round2`, and the artifact
+        #                          outline is injected so the model can anchor.
+        #
+        #   cloud_change_order  -- the SHARED T3 layer returns a change order
+        #                          that local deterministic re-integration
+        #                          applies.  True here, and ALSO true for
+        #                          `modify_harness`: PATH A escalates into the
+        #                          SAME layer when its contracts fail.  The T3
+        #                          layer is shared, not owned by either route.
+        #
+        #   needs_artifact_store -- reads the target artifact from the store.
+        #   needs_t3_context     -- wants the artifact/outline in the T3 prompt.
+        #
+        # The counterpart harness (`modify_harness`, declared in M3) sets
+        # local_change_order: false and keeps the other three true.
+        #
+        # Reversal: delete these four keys -- the dataclass defaults are all
+        # False.
+        # ================================================================
+        local_change_order: true
+        cloud_change_order: true
+        needs_artifact_store: true
+        needs_t3_context: true
+        # ================================================================
+        # 2026-09-14: THE LOCAL T0/T2 CELLS BELOW ARE OVERRIDE-ONLY.
+        # ================================================================
+        # Under the origin-gated pipeline (CoE_coder_spec_modify_pipeline_
+        # DRAFT.md) the normal modify routes are:
+        #   origin prompt present -> PATH A, local REGENERATION from a
+        #       combined prompt (no change order, no reintegration)
+        #   no origin prompt      -> PATH B, CLOUD change order + local
+        #       deterministic reintegration
+        # So this local change-order generation is NO LONGER on the normal
+        # path.  It is RETAINED deliberately, for two reasons:
+        #   1. the manual escape hatch: /task-modify-legacy (or
+        #      routing_override.legacy_route / metadata.legacy_route)
+        #   2. it doubles as the NEW-MODEL CAPABILITY GATE.  It already
+        #      encodes the full bar a future local model must clear:
+        #      JSON-only, all three keys always present, exact section IDs,
+        #      no prose/fences -- AND whether the emitted order survives
+        #      deterministic re-integration.  A model that passes this cell
+        #      has demonstrably earned the local modify path back.
+        # PASS CRITERION = contract compliance + successful re-integration,
+        # NOT output quality: the dominant local failure mode is register
+        # drift (writing commentary where a structural contract is required),
+        # which a subjective read misses but a contract check catches.
+        # Reversal: none needed -- this cell is untouched behaviourally.
+        # ================================================================
+        # 2026-09-09 (user ruling): one-shot cloud-shape requests for local
+        # models. The rounds: block (R1 targeting + R2 edit generation) is
+        # DORMANT -- the runtime gates the two-round path on rounds
+        # presence, so removing it routes modify_artifact through the
+        # single-tier path with the same change-order JSON instruction the
+        # T3 cloud request uses. Each local model gets the full artifact +
+        # outline + change-order contract, one shot + functional retry.
+        # Reversal: re-add rounds: [r1, r2] to the ladder tiers.
+        system_suffix: |
+          You are a competent {{domain_tag}} artifact modification assistant. You are given the complete artifact, its tree-sitter outline, and the user's requested change. Produce a working deterministic change order that satisfies the request by identifying the exact sections by name, referenced to the treesitter outline, with the complete new contents for each modified section, the complete new text for any new sections and an existing anchor section name referenced to the treesitter outline and any sections that must be removed, again by name reference to the treesitter outline. Do not list sections that are not modified and do not regenerate the entire modified file.
+
+          Return ONLY a JSON object with this exact structure:
+
+          {"replacements": [{"name": "exact section ID", "new_text": "complete replacement text"}], "insertions": [{"name": "new section name", "anchor_section": "exact existing section ID", "position": "before or after", "new_text": "complete inserted text"}], "removals": [{"name": "exact section ID", "reason": "why removed"}]}
+
+          Use exact section IDs from the artifact outline, including synthetic `anonymous:` IDs when shown. A section must not appear in both replacements and removals. An insertion may not anchor on a removed section. ALL THREE KEYS (replacements, insertions, removals) MUST ALWAYS BE PRESENT in the JSON object -- use an empty array for any key that has no entries. Never omit a key. Do not return an analysis plan, prose, markdown fences, or reasoning outside the JSON. Be concise.
+
+          You may think through the problem briefly in plain text or by writing a draft change order or a combination of both before your final change order; the last complete change order object in your response is taken as your answer.
+        artifact_contract: modify_artifact_round2
+        functional_errors: [malformed_json, missing_replacements, bad_anchor, unplanned_target, no_change_package, empty_response]
+        output_instruction: "Return only the JSON change order package with replacements, insertions, and removals. Never return the artifact or modified document itself."
+        apply_policy:
+          apply_target: artifact_content
+          apply_mechanism: modify_artifact_deterministic_reintegration
+        sampling: { temperature: 0.6, top_k: -1, top_p: 1.0, repeat_penalty: 1.05, repeat_last_n: 1024, num_ctx: 32768, num_predict: 24576 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            # 2026-09-10 FIX (no-retry, live 14:20): the runtime's func_errs
+            # merge reads LADDER tiers only; the harness-level
+            # functional_errors key is never consulted, so every contract
+            # failure hit the 'unrecognized' branch and broke to the next
+            # slot with zero retries. Declare at tier level (bug_fix
+            # precedent).
+            #
+            # 2026-09-12 FIX (second instance of the SAME class of bug):
+            # the list must ALSO name every non-contract error the tier can
+            # produce, because the runtime's final branch treats an
+            # unclassified string as "unrecognized" -> it increments the
+            # per-MODEL functional counter AND breaks immediately. That
+            # silently consumed the budget for the WHOLE model slot: T0's
+            # self_review_rejected (unclassified) set the counter to 1, so
+            # T2's malformed_json then evaluated 2 > max_func_errors(1) and
+            # broke WITHOUT its intended fresh-seed retry. Added:
+            #   self_review_rejected  -- passed the contract, failed review
+            #   diff_does_not_apply   -- diff dialect did not apply
+            #   artifact_apply_failed -- apply-preview failure
+            # Rule: whenever a NEW error string is introduced anywhere in
+            # the tier path, it MUST be added to this list (or to
+            # pathology.errors) or it silently disables retries downstream.
+            functional_errors: [malformed_json, missing_replacements, bad_anchor, unplanned_target, no_change_package, empty_response, self_review_rejected, diff_does_not_apply, artifact_apply_failed]
+          t2:
+            model_slot: secondary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            functional_errors: [malformed_json, missing_replacements, bad_anchor, unplanned_target, no_change_package, empty_response, self_review_rejected, diff_does_not_apply, artifact_apply_failed]
+          meta_harness_ladder:
+            targets: [cloud_sota]
+            cloud:
+              on_failure: hard_stop
+              silence_timeout_s: 240
+              total_timeout_s: 600
+              # 2026-09-09 (user ruling): separate from local think policy.
+              reasoning_effort: "high"
+              max_tokens: 50000
+              tokens_per_sec: 150
+              prompts:
+                modify_harness_legacy:
+                  system_suffix: "You are a competent artifact modification assistant. You are given the complete artifact, its tree-sitter outline, and the user's requested change. Produce a working deterministic change order that satisfies the request by identifying the exact sections by name, referenced to the treesitter outline, with the complete new contents for each modified section, the complete new text for any new sections and an existing anchor section name referenced to the treesitter outline and any sections that must be removed, again by name reference to the treesitter outline. Do not list sections that are not modified and do not regenerate the entire modified file.\nReturn ONLY a JSON object with this exact structure:\n{\"replacements\": [{\"name\": \"exact section ID\", \"new_text\": \"complete replacement text\"}], \"insertions\": [{\"name\": \"new section name\", \"anchor_section\": \"exact existing section ID\", \"position\": \"before or after\", \"new_text\": \"complete inserted text\"}], \"removals\": [{\"name\": \"exact section ID\", \"reason\": \"why removed\"}]}\n\nUse exact section IDs from the artifact outline, including synthetic `anonymous:` IDs when shown. A section must not appear in both replacements and removals. An insertion may not anchor on a removed section. ALL THREE KEYS (replacements, insertions, removals) MUST ALWAYS BE PRESENT in the JSON object -- use an empty array for any key that has no entries. Never omit a key. Do not return an analysis plan, prose, markdown fences, or reasoning outside the JSON. Be concise."
+                  output_instruction: "Return only the JSON change order package with replacements, insertions, and removals. Never return the artifact or modified document itself."
+              cloud_guards:
+                dither_enabled: true
+                shortstop_enabled: true
+                # 2026-09-18: 2.0 -> 100.0 (temporary data-gathering default; see the
+                # SHORTSTOP note under new_code_generation and README.md).
+                shortstop_rate: 100.0
+                shortstop_min_chars: 30000
+                shortstop_window: 10000
+                dither_limit: 10000
+                dither_limit_think_scale: 3
+                loop_enabled: false
+                loop_guard_min: 2000
+                loop_guard_skip: 2000
+                loop_guard_match: 100
+                # 2026-09-10 (user ruling): window 400 -> 1000 code-base-wide.
+                loop_guard_window: 1000
+          # 2026-09-13 (user ruling): dead `pathology_budget` block REMOVED
+          # (no code reads it; `runtime.pathology` is the live source).
+        runtime:
+          artifact_context:
+            mode: auto
+            full_context_max_chars: 64000
+            max_chars: 48000
+          # 2026-09-10 (user ruling): modify-only output cap. A change order
+          # larger than its target artifact is wrong by construction. The
+          # guard closes the stream; the trip handler extracts the LAST
+          # COMPLETE change order via the round2 contract (single validation
+          # owner) and accepts it, or spends the DEDICATED
+          # output_cap_max_re_rolls budget (1) with a fresh seed. Cloud/T3
+          # exempt (shortstop governs there).
+          primitives: [dither_guard, repetition_loop_guard, modify_output_cap_guard]
+          # 2026-09-10 FIX (latent contract, user-identified): this key
+          # still said modify_artifact_round1 -- a leftover from the
+          # two-round era. The single-tier path dispatches
+          # CONTRACTS.get(runtime.artifact_contract), so the ROUND1 salvage
+          # validator ran on the one-shot R2-shaped output and pre-empted
+          # the correct contract (the live 'no final list' failure). The
+          # one-shot output IS a round2-shaped change order.
+          artifact_contract: modify_artifact_round2
+          retry_new_seed: true
+          # 2026-09-10 (user ruling): explicit loop-guard values instead of
+          # relying on code defaults (the runtime block previously had none).
+          # Values match the general_use/new_code_generation tuning.
+          loop_guard_min: 1400
+          loop_guard_skip: 1400
+          loop_guard_match: 100
+          loop_guard_window: 1000
+          # 2026-09-10 (user ruling): modify-only output cap guard.  A change
+          # order that runs past the artifact size is wrong by construction
+          # (single-domain single-task change orders are smaller than their
+          # target).  On trip: close the stream, extract the LAST COMPLETE
+          # change order, validate against the round2 contract.  Passes ->
+          # accept; fails -> one dedicated re-roll (fresh seed) that does NOT
+          # consume the shared pathology budget.  Cloud/T3 exempt (it has
+          # shortstop).
+          output_cap_factor: 1.0
+          output_cap_min_chars: 4000
+          output_cap_max_re_rolls: 1
+          # 2026-09-11 (user-ruled): invented-section replacement guard.
+          # Replaces the legacy warn-only invented_section_signal when BOTH
+          # conditions trip for a replacement: token overlap with the
+          # original below min_token_overlap AND new_text size ratio below
+          # min_size_ratio (overlap does the semantic work: condensations
+          # keep vocabulary and pass; content-blind stubs fail both).
+          # Replacements-only by construction: removals have no new_text,
+          # insertions have no original section (no baseline). Cloud (T3)
+          # gets half thresholds: it fires after locals failed and is the
+          # ladder's safety net — a false rejection there costs the whole
+          # modify. Values are config-owned; revisit as evidence accrues.
+          # 2026-09-11 (user-ruled): self-review gate. After the change
+          # order passes all contract gates, ONE same-model non-streaming
+          # review call reuses the KV-warm generator prompt (persona +
+          # full artifact + outline + request) and asks whether any
+          # elements/sections/code depend on the changes or are left
+          # unresolved (declared-but-unused, used-but-undeclared,
+          # styles-for-elements-never-rendered, renamed/removed symbols
+          # still called). YES -> integration; NO -> tier fails with the
+          # reviewer reason (retry/ladder as usual). Reviewer call failure
+          # never blocks a contract-valid package.
+          self_review:
+            enabled: true
+            reviewer: same_model
+            verdict_num_predict: 2048
+            max_review_calls_per_tier: 1
+            # 2026-09-12 (user-ruled wording): the review is deliberately
+            # failure-safe and strict — the T3 cloud fall-through is the
+            # design answer to a false rejection, so a marginal local
+            # package should escalate rather than ship. Both arms of the
+            # question are stated explicitly (correctness AND completeness)
+            # and "when applied" redirects judgement to the resulting
+            # artifact rather than the change order's surface syntax.
+            # NOTE: plain prose only — no markdown/emphasis characters.
+            system_suffix: "You are reviewing a proposed change order for the artifact provided above. Review question: will the change order, when applied to the artifact above, address the user's request? If the change order when applied would address the user's request both completely and correctly then the answer to the review question is YES, if not then the answer must be NO. Give the verdict and a one-sentence reason."
+            # 2026-09-12 (user-approved): schema-only verdict. Ollama's
+            # native structured output constrains the reply to this JSON
+            # schema, so the verdict is read as a STRUCTURAL field instead
+            # of being string-matched out of prose. Verified working on
+            # both local reviewer models (web-r25 and gemma4-web-hc) with
+            # done_reason=stop and a clean parse. There is deliberately NO
+            # silent fallback to text parsing: if the reply is not valid
+            # JSON the package FAILS the review (failure-safe), and a
+            # backend that cannot honour `format` raises a transport error
+            # rather than quietly degrading. Property order mirrors the
+            # emission order actually observed (reason first); property
+            # order in the schema does not control generation order.
+            # NOTE: the enum values MUST be quoted — YAML 1.1 resolves a
+            # bare YES/NO to the BOOLEANS true/false, which would send an
+            # enum of booleans to Ollama and never match the model's
+            # string "YES"/"NO" verdict.
+            format_schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                verdict:
+                  type: string
+                  enum: ["YES", "NO"]
+              required: [reason, verdict]
+            # 2026-09-12 (user-approved): a reviewer must not sample. The
+            # reviewer call previously passed NO options at all, so it ran
+            # at Ollama's defaults (temperature 0.8 / top_k 40) and
+            # sometimes returned a bare "NO" with no reasoning. Greedy +
+            # fixed seed makes the verdict deterministic. Keys are merged
+            # through a whitelist in the transport (sampling cannot smuggle
+            # num_ctx/num_predict past the bounded-context chokepoint).
+            sampling:
+              temperature: 0.0
+              top_k: 1
+              seed: 42
+          invented_replacement_guard:
+            enabled: true
+            local:
+              min_size_ratio: 0.40
+              min_token_overlap: 0.20
+            cloud:
+              min_size_ratio: 0.20
+              min_token_overlap: 0.10
+            # 2026-09-11 (user ruling): BOTH semantic conflicts are
+            # rejection categories. A removed/renamed symbol still
+            # referenced elsewhere is almost always breaking.
+            semantic_conflict_guard:
+              enabled: true
+          # 2026-09-12 (user-ruled): `backend_server_error` added.  The
+          # runtime's D5 remap renames a deterministic llama-server 500
+          # (peg-native format etc.) from `backend_error` to
+          # `backend_server_error`, but that new name was classified
+          # NOWHERE -- so every backend crash fell to the "unrecognized"
+          # branch (no retry, budget consumed) while the MODEL-BLACKLIST
+          # skipped the whole slot.  A backend error is a pathology: a
+          # single 500 can be a transient transport/daemon fault, so the
+          # correct response is the existing retry/reroll/escalation budget
+          # plus a loud announcement -- NOT blacklisting a model or a slot
+          # on one occurrence.
+          pathology:
+            max_re_rolls_per_model: 2
+            re_roll_seed_strategy: random_per_model
+            errors: [dither, loop, first_token_timeout, slow_decode_timeout, vram_breach, token_exhaustion, backend_error, backend_server_error, empty_response]
+          stream_primitives:
+            fence_counter:
+              check_cadence_chunks: 25
+              tail_after_close_without_reopen_chunks: 200
+              contract_on_truncate: modify_artifact_round1
+              fence_languages: [json]
+            dither_check:
+              check_cadence_chunks: 25
+            loop_check:
+              check_cadence_chunks: 25
+          timers:
+            first_token_timeout_s: 60.0
+            slow_decode_timeout_s: 90.0
+            cold_load_first_token_timeout_s: 75.0
+            pathology_safety_factor: 2.5
+          re_roll_modifiers:
+            dither: "Your previous pass contained excess dithering. On this attempt: be concise, make the judgment call on the sections, and stop."
+            loop: "Your previous pass contained a repetition loop. On this attempt: be concise and do not repeat the same section names. Produce the JSON and stop."
+            output_cap: "Your previous pass grew far beyond the size of the target artifact without producing a complete change order. On this attempt: commit to the minimal change order immediately, emit the complete JSON object, and stop as soon as it is closed."
+          max_calls_per_instance: 12
+        parameter_ranges:
+          sampling.temperature: [0.0, 2.0]
+          sampling.num_predict: [512, 32768]
+          pathology.max_re_rolls_per_model: [0, 10]
+          dither_limit: [1, 100]
+          loop_guard_min: [100, 5000]
+          loop_guard_skip: [100, 5000]
+          loop_guard_match: [10, 500]
+          loop_guard_window: [50, 2000]
+          output_cap_factor: [0.5, 5.0]
+          output_cap_min_chars: [500, 100000]
+          output_cap_max_re_rolls: [0, 3]
+          max_calls_per_instance: [1, 50]
+          timers.first_token_timeout_s: [10.0, 300.0]
+          timers.slow_decode_timeout_s: [10.0, 600.0]
+          timers.cold_load_first_token_timeout_s: [10.0, 600.0]
+
+      # Opt-in A/B harness region -- `modify_artifact_focused` RETIRED (M3).
+      #
+      # It was an `extends: modify_artifact` variant (focused_sections context)
+      # with no domain row referencing it.  Retiring it alongside the rename is
+      # deliberate: `extends` resolves the parent BY NAME at load time, so
+      # leaving it would have left it pointing at a key that no longer exists.
+      #
+      # Reversal: re-add the block with `extends: modify_harness_legacy`.
+
+      # ================================================================
+      # modify_harness -- NORMAL OPERATION (PATH A).
+      # ================================================================
+      # [FLAGGED FALSE as of 2026-09-20 -- superseded, retained deliberately.]
+      # The lines below were TRUE when written (2026-09-16) and are FALSE now.
+      # They are kept verbatim so the supersession is visible and the previous
+      # claim stays auditable rather than being silently overwritten.
+      #
+      # SUPERSEDED TEXT (was lines 1389-1392 on 2026-09-16):
+      #   # modify_harness -- NORMAL OPERATION (PATH A).  DECLARED, not yet routed.
+      #   # `task_harnesses` still points at `modify_harness_legacy`, so NOTHING
+      #   # routes here yet.  This block is inert until M4 re-points the row.
+      #
+      # ------------------------------------------------------------------
+      # 2026-09-20: M4 IS NOW COMPLETE -- this harness IS the routed one.
+      # ------------------------------------------------------------------
+      # `task_harnesses.modify_artifact` resolves to `modify_harness` on all
+      # four `domain_rows` that declare a modify harness: domain_python (:284),
+      # domain_compiled (:307), domain_web (:318), domain_other (:362).
+      # `modify_harness_legacy` is now OVERRIDE-ONLY, per spec 15.9 item 7: it
+      # is reachable ONLY via `/task-modify-legacy` (or
+      # `routing_override.legacy_route` / `metadata.legacy_route`), and the
+      # selector is the block at server.py ~2858, gated on NOT direct cloud.
+      #
+      # WHY IT EXISTS.  PATH A is a DENOVO regeneration, but it ran on the
+      # legacy harness while swapping only the CONTRACT.  The runtime block was
+      # not swapped, so change-order settings leaked into a denovo path:
+      #
+      #   stream_primitives.fence_counter.fence_languages: [json]
+      #
+      # `_fence_aliases_for` returns that override UNCONDITIONALLY, so an HTML
+      # (or Python, or JS, or CSS) artifact resolved to ['json'], the denovo
+      # fence check could never match its own output, and every regeneration
+      # failed with `no_code_fence` -- which is unclassified in the legacy
+      # tiers, so it took the 'unrecognized' branch: no retry, budget consumed.
+      # Observed live as:  [ladder] UNCLASSIFIED ERROR 'no_code_fence' at tier=T0
+      #
+      # This harness declares NO fence override, so resolution falls through
+      # to FENCE_ALIASES and html -> ['html','htm'].  That is a STRUCTURAL fix,
+      # not a patch: the leak is unreachable because there is no key to leak.
+      #
+      # [FLAGGED FALSE as of 2026-09-20 -- superseded, retained deliberately.]
+      # SUPERSEDED TEXT (was line 1411 on 2026-09-16):
+      #   # PATH A on this harness, and PATH B on `modify_harness_legacy`.
+      #
+      # 2026-09-20: PATH A runs here, and PATH B runs here TOO.  Both are the
+      # LOCAL layer, and both resolve to `modify_harness`, because that is what
+      # the `task_harnesses` row now names.  `modify_harness_legacy` is reached
+      # only by the `-legacy` override, which is a different axis.
+      # The SHARED T3 layer is still reached identically from both -- see the
+      # cloud_change_order note on the legacy harness above.
+      # ================================================================
+      modify_harness:
+        family: modify_harness
+        tiers: [T0, T2]
+        closed_think: true
+        # Denovo output shape: a whole artifact, never a change order.
+        artifact_contract: new_code_generation
+        output_instruction: "Return the complete artifact in a single fenced code block. Never return a change order, a diff, a plan, or a description."
+        # ----------------------------------------------------------------
+        # CAPABILITY PROPERTIES -- the two-layer distinction, applied.
+        # ----------------------------------------------------------------
+        # local_change_order: false -- this harness's LOCAL tier is a denovo
+        #     regeneration.  Its system_suffix and output_instruction below
+        #     demand the COMPLETE artifact, so every local change-order gate
+        #     (artifact-context injection, output-cap binding, self-review,
+        #     cap rescue) is skipped by construction rather than neutralised
+        #     key by key.  That is the structural answer to the leak above.
+        # cloud_change_order: true -- PATH A ESCALATES into the shared T3
+        #     layer when its contracts fail, and that layer returns a change
+        #     order which local deterministic re-integration applies.  This is
+        #     the SHARED layer, not part of the PATH A branch.
+        # needs_artifact_store: true -- reads the target artifact (for the
+        #     denovo contract swap and the regenerated-commit flag).
+        # needs_t3_context: true -- the cloud must see the artifact + outline
+        #     to emit a change order for the escalation.
+        # ----------------------------------------------------------------
+        local_change_order: false
+        cloud_change_order: true
+        needs_artifact_store: true
+        needs_t3_context: true
+        # Denovo classification.  These are the strings the denovo contract
+        # can emit.  They are declared at TIER level because the runtime's
+        # func_errs merge reads LADDER tiers only -- a harness-level
+        # functional_errors key is never consulted (the 2026-09-10 no-retry
+        # fix).  `no_code_fence` and `syntax_error` are the two the legacy
+        # change-order tiers were missing.
+        functional_errors: [empty_response, no_code_fence, syntax_error, modification_absent]
+        sampling: { temperature: 0.6, top_k: -1, top_p: 1.0, repeat_penalty: 1.05, repeat_last_n: 1024, num_ctx: 32768, num_predict: 24576 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            functional_errors: [empty_response, no_code_fence, syntax_error, modification_absent]
+          # T1b: error-trace retry on the PRIMARY slot (seed reused, so the
+          # model sees its own failed attempt).  There is deliberately NO T1a:
+          # T1a is a change-order concept (targeted edit of a section), which
+          # does not exist on a denovo regeneration.
+          t1b:
+            model_slot: primary
+            seed_policy: same_as_t0
+            functional_budget: 1
+            user_modifier: |
+              The model's generated code has the following error trace:
+              {prior_error}
+
+              Regenerate the code without the error.
+            functional_errors: [empty_response, no_code_fence, syntax_error]
+          t2:
+            model_slot: secondary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            functional_errors: [empty_response, no_code_fence, syntax_error]
+          # The SHARED T3 layer.  Deliberately spelled as a reference to the
+          # same configuration the legacy harness uses -- ONE definition, not
+          # a copy, because a duplicated cloud block is how the two harnesses
+          # would drift apart.  PATH A's escalation and the legacy ladder
+          # reach the SAME layer.
+          meta_harness_ladder:
+            targets: [cloud_sota]
+            cloud:
+              on_failure: hard_stop
+              silence_timeout_s: 240
+              total_timeout_s: 600
+              reasoning_effort: "high"
+              max_tokens: 50000
+              tokens_per_sec: 150
+              prompts:
+                modify_harness:
+                  system_suffix: "You are a competent artifact modification assistant. You are given the complete artifact, its tree-sitter outline, and the user's requested change. Produce a working deterministic change order that satisfies the request by identifying the exact sections by name, referenced to the treesitter outline, with the complete new contents for each modified section, the complete new text for any new sections and an existing anchor section name referenced to the treesitter outline and any sections that must be removed, again by name reference to the treesitter outline. Do not list sections that are not modified and do not regenerate the entire modified file.\nReturn ONLY a JSON object with this exact structure:\n{\"replacements\": [{\"name\": \"exact section ID\", \"new_text\": \"complete replacement text\"}], \"insertions\": [{\"name\": \"new section name\", \"anchor_section\": \"exact existing section ID\", \"position\": \"before or after\", \"new_text\": \"complete inserted text\"}], \"removals\": [{\"name\": \"exact section ID\", \"reason\": \"why removed\"}]}\n\nUse exact section IDs from the artifact outline, including synthetic `anonymous:` IDs when shown. A section must not appear in both replacements and removals. An insertion may not anchor on a removed section. ALL THREE KEYS (replacements, insertions, removals) MUST ALWAYS BE PRESENT in the JSON object -- use an empty array for any key that has no entries. Never omit a key. Do not return an analysis plan, prose, markdown fences, or reasoning outside the JSON. Be concise."
+                  output_instruction: "Return only the JSON change order package with replacements, insertions, and removals. Never return the artifact or modified document itself."
+              cloud_guards:
+                dither_enabled: true
+                shortstop_enabled: true
+                # 2026-09-18: 2.0 -> 100.0 (temporary data-gathering default; see the
+                # SHORTSTOP note under new_code_generation and README.md).
+                shortstop_rate: 100.0
+                shortstop_min_chars: 30000
+                shortstop_window: 10000
+                dither_limit: 10000
+                dither_limit_think_scale: 3
+                loop_enabled: false
+                loop_guard_min: 2000
+                loop_guard_skip: 2000
+                loop_guard_match: 100
+                loop_guard_window: 1000
+        runtime:
+          # NO artifact_context block: the model gets the combo prompt built
+          # from the header (origin prompt + modification history + request),
+          # not the full artifact body.  This is the header-only rule.
+          #
+          # NO stream_primitives.fence_counter override: this is the D1 fix.
+          # Declaring nothing means `_fence_aliases_for` falls through to
+          # FENCE_ALIASES, so the detected language (html/html, python/py,
+          # javascript/js, ...) resolves correctly for a denovo artifact.
+          #
+          # NO output_cap_* keys: a denovo artifact is artifact-sized BY
+          # CONSTRUCTION, so a cap relative to the parent is meaningless.  The
+          # only bound on denovo output is sampling.num_predict (24576), the
+          # system cap.
+          primitives: [dither_guard, repetition_loop_guard]
+          artifact_contract: new_code_generation
+          retry_new_seed: true
+          # ================================================================
+          # PATH A REGENERATION KEYS (moved here from `modify_artifact_regenerate`).
+          # ================================================================
+          # These four ARE PATH A's contract and wording.  They used to live in
+          # a separate `modify_artifact_regenerate` cell that server.py read by
+          # NAME at request time -- so the harness that actually EXECUTED PATH A
+          # carried none of its own configuration.  That indirection is what the
+          # harness split exists to remove, and it is now retired.
+          #
+          # Behaviour is preserved exactly: `runtime = work.harness.runtime`
+          # (runtime.py:3835) seeds these values directly, and the write-back in
+          # execute_runtime_plan is guarded ("bound only when supplied, so the
+          # harness's own values are not overwritten by an empty override").
+          # The server-side copy loop that used to inject them is gone, so
+          # precedence is unchanged: the harness's own values win, as intended.
+          # ================================================================
+          # 2026-09-17 (user ruling): `modify_regeneration_contract` was
+          # RETIRED.  It named `new_code_generation` unconditionally, which is
+          # how a PROSE artifact came to be validated by a CODE contract: a
+          # correct two-paragraph expansion was rejected `no_code_fence`, four
+          # local calls over two cold loads produced nothing, and the request
+          # escalated to T3.
+          #
+          # The denovo contract is now selected from the ARTIFACT'S LANGUAGE
+          # alone -- `runtime.denovo_contract_for_language`, reading the parent
+          # through the artifact store.  There is nothing to declare here for
+          # code; to retune which contract a language gets, edit that map.
+          # Spec 6.1-6.4 PATH A drift checks + disclosure.  Set FALSE to disable
+          # the whole set without a code change (the documented reversal).
+          modify_drift_checks: true
+          # The regeneration instruction.  This REPLACES the change-order
+          # wording for the local tiers: the harness's own system_suffix says
+          # "return ONLY a JSON object ... never return the artifact", which is
+          # exactly backwards for a denovo regeneration.  `{{domain_tag}}` is
+          # substituted with the domain language at runtime.
+          modify_regeneration_system_suffix: |-
+            You are a competent {{domain_tag}} engineer. Produce the COMPLETE, working artifact requested below -- the full file, not a description, not a plan, and not a diff. Satisfy the original build request plus every subsequent modification, and then the current request. Keep behaviour that is not being changed. Emit the artifact in a single fenced code block and nothing else.
+          modify_regeneration_output_instruction: "Return the complete artifact in a single fenced code block. Never return a change order, a diff, a plan, or a description."
+          # 2026-09-17: PROSE variants.  The two above demand a FENCE; for a
+          # markdown/plain-text artifact that is exactly wrong -- it is what
+          # invited the ```python wrapper that then failed compile() on a curly
+          # apostrophe.  Selected when the artifact's language resolves to the
+          # prose contract (`_regen_is_prose`).
+          modify_regeneration_prose_system_suffix: |-
+            You are a competent writer. Produce the COMPLETE revised document requested below -- the full text, not a description, not a plan, and not a diff. Satisfy the original request plus every subsequent modification, and then the current request. Keep wording that is not being changed. Return only the document text.
+          modify_regeneration_prose_output_instruction: "Return only the complete document text. Never return a change order, a diff, a plan, or a description, and do not wrap the document in a code fence."
+          loop_guard_min: 1400
+          loop_guard_skip: 1400
+          loop_guard_match: 100
+          loop_guard_window: 1000
+          pathology:
+            max_re_rolls_per_model: 2
+            re_roll_seed_strategy: random_per_model
+            errors: [dither, loop, first_token_timeout, slow_decode_timeout, vram_breach, token_exhaustion, backend_error, backend_server_error, empty_response, output_cap_exceeded]
+          timers:
+            first_token_timeout_s: 60.0
+            slow_decode_timeout_s: 90.0
+            cold_load_first_token_timeout_s: 75.0
+            pathology_safety_factor: 2.5
+          re_roll_modifiers:
+            dither: "Your previous pass contained excess dithering. On this attempt: be concise, commit to the artifact, and stop."
+            loop: "Your previous pass contained a repetition loop. On this attempt: be concise, do not repeat yourself, and stop after the closing fence."
+          max_calls_per_instance: 12
+      evaluate_artifact:
+        family: evaluate_artifact
+        tiers: [T0, T2]
+        closed_think: true
+        assistant_prefill: null
+        # ================================================================
+        # 2026-09-16 (M2): REQUIRED for behavioural equivalence.
+        # ================================================================
+        # Gate 10 in runtime.py used to read:
+        #
+        #     _harness_id in ("modify_artifact", "evaluate_artifact")
+        #
+        # when deciding whether to inject the artifact content + outline into
+        # the T3 prompt.  That gate is now the `needs_t3_context` property, so
+        # this harness MUST declare it or its cloud request silently loses the
+        # artifact context it depends on -- its own cloud prompt at
+        # `cloud.prompts.evaluate_artifact` says "The artifact content,
+        # structure, and section index are provided separately".
+        #
+        # This is the second harness the old tuple test covered.  Omitting it
+        # would have been a silent regression introduced by the M2 rewrite
+        # itself: the gate would still run, find the flag unset, and quietly
+        # stop sending the artifact to the cloud.
+        #
+        # It deliberately does NOT set emits_change_order: evaluate emits a
+        # report, not a change order, so no change-order gate applies to it --
+        # which is precisely why the old name test also checked for this
+        # harness by name.
+        # ================================================================
+        needs_t3_context: true
+        sampling: { temperature: 0.6, top_k: -1, top_p: 1.0, repeat_penalty: 1.05, repeat_last_n: 1024, num_ctx: 32768, num_predict: 24576 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            artifact_contract: evaluate_artifact
+            functional_errors: [malformed_report, empty_response]
+          t2:
+            model_slot: secondary
+            seed_policy: fresh
+            functional_budget: 1
+            user_modifier: null
+            artifact_contract: evaluate_artifact
+            functional_errors: [malformed_report, empty_response]
+          meta_harness_ladder:
+            targets: [cloud_sota, generalist_zero_shot]
+            cloud:
+              on_failure: hard_stop
+              silence_timeout_s: 240
+              total_timeout_s: 600
+              # 2026-09-09 (user ruling): separate from local think policy.
+              reasoning_effort: "high"
+              max_tokens: 50000
+              tokens_per_sec: 150
+              prompts:
+                evaluate_artifact:
+                  system_suffix: "You are an artifact analysis assistant. The artifact content, structure, and section index are provided separately. Follow the user's request exactly. The user's requested answer target takes priority over the word \"evaluate\". Answer navigation and data-flow questions directly. Use section names and concise code references. Be concise, do not reason at length."
+                  output_instruction: "Answer the user's question about the artifact directly and concisely."
+              cloud_guards:
+                dither_enabled: true
+                shortstop_enabled: true
+                # 2026-09-18: 2.0 -> 100.0 (temporary data-gathering default; see the
+                # SHORTSTOP note under new_code_generation and README.md).
+                shortstop_rate: 100.0
+                shortstop_min_chars: 30000
+                shortstop_window: 10000
+                dither_limit: 10000
+                dither_limit_think_scale: 3
+                loop_enabled: false
+                loop_guard_min: 2000
+                loop_guard_skip: 2000
+                loop_guard_match: 100
+                # 2026-09-10 (user ruling): window 400 -> 1000 code-base-wide.
+                loop_guard_window: 1000
+          # 2026-09-13 (user ruling): dead `pathology_budget` block REMOVED
+          # (no code reads it; `runtime.pathology` is the live source).
+        runtime:
+          primitives: [dither_guard, repetition_loop_guard]
+          artifact_contract: evaluate_artifact
+          retry_new_seed: true
+          # 2026-09-10 (user ruling): explicit loop-guard values instead of
+          # relying on code defaults (the runtime block previously had none).
+          loop_guard_min: 1400
+          loop_guard_skip: 1400
+          loop_guard_match: 100
+          loop_guard_window: 1000
+          pathology:
+            max_re_rolls_per_model: 2
+            re_roll_seed_strategy: random_per_model
+            errors: [dither, loop, first_token_timeout, slow_decode_timeout, vram_breach, token_exhaustion, backend_error, empty_response]
+          stream_primitives:
+            fence_counter:
+              check_cadence_chunks: -1
+            dither_check:
+              check_cadence_chunks: 25
+            loop_check:
+              check_cadence_chunks: 25
+          timers:
+            first_token_timeout_s: 60.0
+            slow_decode_timeout_s: 90.0
+            cold_load_first_token_timeout_s: 75.0
+            pathology_safety_factor: 2.5
+          re_roll_modifiers:
+            dither: "Your previous response contained excess dithering. On this attempt: be concise, commit to your analysis, and do not second-guess yourself. Produce the report and stop."
+            loop: "Your previous response contained a repetition loop. On this attempt: be concise and do not repeat the same phrases. Produce the report and stop."
+          max_calls_per_instance: 12
+        parameter_ranges:
+          sampling.temperature: [0.0, 2.0]
+          sampling.num_predict: [512, 32768]
+          pathology.max_re_rolls_per_model: [0, 10]
+          dither_limit: [1, 100]
+          loop_guard_min: [100, 5000]
+          loop_guard_skip: [100, 5000]
+          loop_guard_match: [10, 500]
+          loop_guard_window: [50, 2000]
+          max_calls_per_instance: [1, 50]
+          timers.first_token_timeout_s: [10.0, 300.0]
+          timers.slow_decode_timeout_s: [10.0, 600.0]
+          timers.cold_load_first_token_timeout_s: [10.0, 600.0]
+        system_suffix: |
+          You are an artifact analysis assistant. The artifact content, structure, and section index are provided separately. Follow the user's request exactly.
+
+          The user's requested answer target takes priority over the word "evaluate". When the user asks what function, section, symbol, or code path controls a behavior, answer that navigation and data-flow question directly. Do not produce a general quality assessment, list unrelated issues, infer an unrequested review depth, or invent a "quick look" or "deep dive" request. Use section names and concise code references when they directly support the answer. The user request is authoritative; do not repeat this instruction block.
+    
+      # ── Trivial-answer harness (2026-09-03 unification) ──
+      # A real harness like every other path: the server composes the
+      # package through CleanHarness.compose() and dispatches through
+      # the tier machinery. Config owns the policy; code owns the
+      # mechanism. No temperature key here on purpose: the router
+      # model's provider default temperature applies (user amendment).
+      trivial_answer:
+        family: trivial_answer
+        tiers: [T0]
+        closed_think: false
+        assistant_prefill: null
+        sampling: { num_ctx: 4096, num_predict: 100, keep_alive: 300 }
+        escalation_ladder:
+          t0:
+            model_slot: primary
+            seed_policy: fresh
+            functional_budget: 0
+            user_modifier: null
+            artifact_contract: null
+            functional_errors: []
+          # 2026-09-13 (user ruling): dead `pathology_budget` block REMOVED
+          # (no code reads it; `runtime.pathology` is the live source).
+          meta_harness_ladder: null
+        runtime:
+          primitives: []
+          retry_new_seed: false
+          pathology:
+            max_re_rolls_per_model: 0
+            errors: [empty_response]
+          stream_primitives: {}
+          timers:
+            first_token_timeout_s: 45.0
+            slow_decode_timeout_s: 60.0
+            cold_load_first_token_timeout_s: 60.0
+            pathology_safety_factor: 2.0
+          max_calls_per_instance: 1
+        parameter_ranges:
+          sampling.num_predict: [32, 256]
+          timers.first_token_timeout_s: [5.0, 120.0]
+          timers.slow_decode_timeout_s: [5.0, 240.0]
+          max_calls_per_instance: [1, 1]
+        system_suffix: "Answer the user's question directly and concisely in 100 tokens or fewer. If the request includes an image, answer from the image content. Do not ask questions back."

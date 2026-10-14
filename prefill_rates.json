@@ -1,0 +1,302 @@
+{
+  "JThomas-CoE/coe-gemma4-physics-mmlu_pro-14b-a4b-q4:latest": {
+    "cold": {
+      "12500": {
+        "max_rate_tok_per_s": 732.4,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 708.92,
+        "min_rate_tok_per_s": 676.92,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 215.95,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 202.07,
+        "min_rate_tok_per_s": 200.91,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 439.15,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 439.15,
+        "min_rate_tok_per_s": 437.51,
+        "reps": 3
+      }
+    },
+    "warm": {
+      "12500": {
+        "max_rate_tok_per_s": 1326.55,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 1324.39,
+        "min_rate_tok_per_s": 1244.4,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 1286.38,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 1285.63,
+        "min_rate_tok_per_s": 1229.83,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 1429.27,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 1407.04,
+        "min_rate_tok_per_s": 1327.16,
+        "reps": 3
+      }
+    }
+  },
+  "coe-qwen3.6-physics-admix-borda75-18b-a3b:q4_K_M": {
+    "cold": {
+      "12500": null,
+      "2000": null,
+      "5000": null
+    },
+    "warm": {
+      "12500": null,
+      "2000": null,
+      "5000": null
+    }
+  },
+  "coe-svdv2-coding_python-bb128-r25:q4_K_M": {
+    "cold": {
+      "12500": {
+        "max_rate_tok_per_s": 747.19,
+        "median_actual_tokens": 13823,
+        "median_rate_tok_per_s": 742.81,
+        "min_rate_tok_per_s": 735.97,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 249.77,
+        "median_actual_tokens": 2209,
+        "median_rate_tok_per_s": 248.48,
+        "min_rate_tok_per_s": 244.17,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 496.53,
+        "median_actual_tokens": 5516,
+        "median_rate_tok_per_s": 484.24,
+        "min_rate_tok_per_s": 480.32,
+        "reps": 3
+      }
+    },
+    "warm": {
+      "12500": {
+        "max_rate_tok_per_s": 1200.43,
+        "median_actual_tokens": 13823,
+        "median_rate_tok_per_s": 1198.77,
+        "min_rate_tok_per_s": 1171.74,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 1121.89,
+        "median_actual_tokens": 2209,
+        "median_rate_tok_per_s": 1121.89,
+        "min_rate_tok_per_s": 1113.41,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 1265.43,
+        "median_actual_tokens": 5516,
+        "median_rate_tok_per_s": 1256.49,
+        "min_rate_tok_per_s": 1256.21,
+        "reps": 3
+      }
+    }
+  },
+  "gemma4:12b": {
+    "cold": {
+      "12500": {
+        "max_rate_tok_per_s": 439.51,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 434.33,
+        "min_rate_tok_per_s": 416.74,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 172.48,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 172.27,
+        "min_rate_tok_per_s": 171.22,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 316.38,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 314.14,
+        "min_rate_tok_per_s": 302.3,
+        "reps": 3
+      }
+    },
+    "warm": {
+      "12500": {
+        "max_rate_tok_per_s": 627.94,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 606.4,
+        "min_rate_tok_per_s": 594.17,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 673.58,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 670.31,
+        "min_rate_tok_per_s": 625.71,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 681.7,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 669.95,
+        "min_rate_tok_per_s": 652.67,
+        "reps": 3
+      }
+    }
+  },
+  "gemma4:26b-a4b-it-q4_K_M": {
+    "cold": {
+      "12500": {
+        "max_rate_tok_per_s": 468.36,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 461.28,
+        "min_rate_tok_per_s": 461.03,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 106.91,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 106.03,
+        "min_rate_tok_per_s": 102.79,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 241.18,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 240.69,
+        "min_rate_tok_per_s": 238.25,
+        "reps": 3
+      }
+    },
+    "warm": {
+      "12500": {
+        "max_rate_tok_per_s": 1263.97,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 1262.12,
+        "min_rate_tok_per_s": 1237.38,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 1208.97,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 1188.81,
+        "min_rate_tok_per_s": 1168.69,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 1337.45,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 1322.39,
+        "min_rate_tok_per_s": 1317.65,
+        "reps": 3
+      }
+    }
+  },
+  "jthomas/coe-gemma4-python-hc-14b-a4b:q4_K_M": {
+    "cold": {
+      "12500": {
+        "max_rate_tok_per_s": 726.39,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 716.38,
+        "min_rate_tok_per_s": 712.36,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 213.65,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 210.78,
+        "min_rate_tok_per_s": 209.56,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 446.36,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 437.51,
+        "min_rate_tok_per_s": 425.92,
+        "reps": 3
+      }
+    },
+    "warm": {
+      "12500": {
+        "max_rate_tok_per_s": 1338.5,
+        "median_actual_tokens": 13824,
+        "median_rate_tok_per_s": 1306.86,
+        "min_rate_tok_per_s": 1284.04,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 1285.63,
+        "median_actual_tokens": 2210,
+        "median_rate_tok_per_s": 1274.51,
+        "min_rate_tok_per_s": 1229.83,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 1441.22,
+        "median_actual_tokens": 5517,
+        "median_rate_tok_per_s": 1412.44,
+        "min_rate_tok_per_s": 1406.68,
+        "reps": 3
+      }
+    }
+  },
+  "qwen3.6:35b-a3b-q4_K_M": {
+    "cold": {
+      "12500": {
+        "max_rate_tok_per_s": 548.12,
+        "median_actual_tokens": 13823,
+        "median_rate_tok_per_s": 496.73,
+        "min_rate_tok_per_s": 484.75,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 137.39,
+        "median_actual_tokens": 2209,
+        "median_rate_tok_per_s": 135.94,
+        "min_rate_tok_per_s": 129.82,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 288.18,
+        "median_actual_tokens": 5516,
+        "median_rate_tok_per_s": 281.51,
+        "min_rate_tok_per_s": 280.86,
+        "reps": 3
+      }
+    },
+    "warm": {
+      "12500": {
+        "max_rate_tok_per_s": 1032.26,
+        "median_actual_tokens": 13823,
+        "median_rate_tok_per_s": 1005.31,
+        "min_rate_tok_per_s": 1003.05,
+        "reps": 3
+      },
+      "2000": {
+        "max_rate_tok_per_s": 962.11,
+        "median_actual_tokens": 2209,
+        "median_rate_tok_per_s": 961.69,
+        "min_rate_tok_per_s": 930.11,
+        "reps": 3
+      },
+      "5000": {
+        "max_rate_tok_per_s": 1056.91,
+        "median_actual_tokens": 5516,
+        "median_rate_tok_per_s": 959.3,
+        "min_rate_tok_per_s": 938.89,
+        "reps": 3
+      }
+    }
+  }
+}
