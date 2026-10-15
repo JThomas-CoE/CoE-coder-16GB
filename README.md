@@ -2,6 +2,12 @@
 
 This is the standalone CoE-coder runtime repository for a 16 GB GPU budget; model weights are not included. Model creation, activation profiling, pruning strategies, and model releases live in the [College of Experts AI research repository](https://github.com/JThomas-CoE/College-of-Experts-AI/tree/main).
 
+The runtime implements the separability hypothesis — that domain capability in MoE models is concentrated in expert subsets that can be surgically extracted without post-surgery training, with unrelated capability measurably excised. The hypothesis and its demonstrations are documented in:
+
+- J. Thomas, *College of Experts: Decomposing Mixture-of-Experts Architectures into Disk-Resident Specialist Networks for Consumer Hardware* (technical report v0.9, February 2026). [doi:10.5281/zenodo.23403227](https://doi.org/10.5281/zenodo.23403227)
+- J. Thomas, *Separability of Intelligence in Mixture-of-Experts: Slicing Qwen3-Coder into Independent Domain Specialists* (whitepaper, March 2026). [doi:10.5281/zenodo.23403231](https://doi.org/10.5281/zenodo.23403231)
+- J. Thomas, *Gemma4 College of Experts MMLU-Pro Domain Specialists: Automated Profiling Pipeline and Near/Far Transfer Analysis* (model card documentation, May 2026). [doi:10.5281/zenodo.23403233](https://doi.org/10.5281/zenodo.23403233)
+
 ## What it is
 
 CoE-coder-16GB exposes an OpenAI-compatible chat API and an interactive CLI over memory constrained local specialist models. A domain/task matrix selects a specialist and its harness; bounded execution, validation, retry/escalation policies, artifact versioning, and session memory are managed by the runtime. In this instance the specialist models are MoE models that have had their ffn experts pruned by 50% resulting in about a 40 to 45% reduction in memory footprint excluding KV cache. None of these models has had post-pruning training. On the 75-question LiveCodeBench set, direct runs give Qwen 52/75 against 61/75 for the parent and Tiel 53/75 against 62/75; the benchmark sections below give the full python coding comparison.
